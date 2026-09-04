@@ -1,7 +1,9 @@
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { claudeCapability } from '../../../src/agent/capability';
+import { claudeCapability, codexCapability } from '../../../src/agent/capability';
+import type { AppPreferences } from '../../../src/config/schema';
+import type { AgentKind } from '../../../src/config/profile-schema';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { startRunFlow } from '../../../src/bot/run-flow';
 import { ProcessPool } from '../../../src/bot/process-pool';
@@ -100,9 +102,85 @@ describe('IM run flow', () => {
     expect(h.agent.runOptions[0]?.cwd).toBe(workspaceRealpath);
   });
 
+  it('lets the current session override the profile Codex defaults', async () => {
+    const h = await createHarness({
+      defaultWorkspace: true,
+      agentKind: 'codex',
+      preferences: { model: 'gpt-5.6-luna', reasoningEffort: 'low' },
+    });
+    h.sessions.setAgentPreferences('chat-1', {
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'ultra',
+    });
+
+    const result = await startRunFlow({
+      scopeId: 'chat-1',
+      scope: { source: 'im', chatId: 'chat-1', actorId: 'ou_user' },
+      prompt: 'hello',
+      attachments: [],
+      access: { ok: true, reason: 'allowed-user' },
+      capability: codexCapability(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(h.agent.runOptions[0]).toMatchObject({
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'ultra',
+    });
+  });
+
+  it('submits concurrent scopes with their own Codex model settings', async () => {
+    const h = await createHarness({
+      defaultWorkspace: true,
+      agentKind: 'codex',
+      maxParallel: 2,
+      preferences: { model: 'gpt-5.6-luna', reasoningEffort: 'low' },
+    });
+    h.sessions.setAgentPreferences('chat-sol', {
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'ultra',
+    });
+    h.sessions.setAgentPreferences('chat-terra', {
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'xhigh',
+    });
+
+    const start = (scopeId: string) => startRunFlow({
+      scopeId,
+      scope: { source: 'im' as const, chatId: scopeId, actorId: 'ou_user' },
+      prompt: 'hello',
+      attachments: [],
+      access: { ok: true as const, reason: 'allowed-user' },
+      capability: codexCapability(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+    const [sol, terra] = await Promise.all([start('chat-sol'), start('chat-terra')]);
+
+    expect(sol.ok).toBe(true);
+    expect(terra.ok).toBe(true);
+    expect(h.agent.runOptions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ model: 'gpt-5.6-sol', reasoningEffort: 'ultra' }),
+      expect.objectContaining({ model: 'gpt-5.6-terra', reasoningEffort: 'xhigh' }),
+    ]));
+  });
+
 });
 
-async function createHarness(options: { defaultWorkspace?: boolean } = {}): Promise<{
+async function createHarness(options: {
+  defaultWorkspace?: boolean;
+  agentKind?: AgentKind;
+  maxParallel?: number;
+  preferences?: AppPreferences;
+} = {}): Promise<{
   tmp: TmpProfile;
   agent: FakeAgentAdapter;
   executor: RunExecutor;
@@ -114,15 +192,16 @@ async function createHarness(options: { defaultWorkspace?: boolean } = {}): Prom
   const agent = new FakeAgentAdapter({
     events: [{ type: 'done', terminationReason: 'normal' }],
   });
+  let runCount = 0;
   const executor = new RunExecutor({
     agent,
-    pool: new ProcessPool(() => 1),
+    pool: new ProcessPool(() => options.maxParallel ?? 1),
     activeRuns: new ActiveRuns(),
-    createRunId: () => 'run-1',
+    createRunId: () => `run-${++runCount}`,
     now: () => 1000,
   });
   const profileConfig = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: options.agentKind ?? 'claude',
     accounts: {
       app: {
         id: 'cli_test',
@@ -130,6 +209,8 @@ async function createHarness(options: { defaultWorkspace?: boolean } = {}): Prom
         tenant: 'feishu',
       },
     },
+    preferences: options.preferences,
+    ...(options.agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
   });
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));

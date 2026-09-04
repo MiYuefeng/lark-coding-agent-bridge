@@ -7,6 +7,30 @@ import type { AgentKind } from '../config/profile-schema';
  * the option `value`s exactly and rejects an empty string.
  */
 export const DEFAULT_MODEL = 'default';
+export const DEFAULT_REASONING_EFFORT = 'default';
+/** Config-card sentinel meaning the current session follows profile defaults. */
+export const INHERIT_PROFILE_SELECTION = 'inherit-profile';
+
+export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+
+export interface ReasoningEffortOption {
+  /** Stored in preferences; the default sentinel omits the Codex override. */
+  value: typeof DEFAULT_REASONING_EFFORT | CodexReasoningEffort;
+  /** Human-facing label shown in config pickers. */
+  label: string;
+}
+
+export interface AgentModelPreferences {
+  model?: string;
+  reasoningEffort?: string;
+}
+
+export interface ResolvedAgentModelConfig {
+  modelSelection: string;
+  reasoningEffortSelection: ReasoningEffortOption['value'];
+  model: string | undefined;
+  reasoningEffort: CodexReasoningEffort | undefined;
+}
 
 export interface ModelOption {
   /**
@@ -16,7 +40,31 @@ export interface ModelOption {
   value: string;
   /** Human-facing label shown in the `/config` picker. */
   label: string;
+  /** Codex reasoning levels supported by this model. Absent for Claude. */
+  reasoningEfforts?: ReasoningEffortOption[];
 }
+
+const DEFAULT_EFFORT_OPTION: ReasoningEffortOption = {
+  value: DEFAULT_REASONING_EFFORT,
+  label: '跟随默认（不指定）',
+};
+
+const CODEX_EFFORT_OPTIONS: Record<CodexReasoningEffort, ReasoningEffortOption> = {
+  low: { value: 'low', label: 'Low' },
+  medium: { value: 'medium', label: 'Medium' },
+  high: { value: 'high', label: 'High' },
+  xhigh: { value: 'xhigh', label: 'XHigh' },
+  max: { value: 'max', label: 'Max' },
+  ultra: { value: 'ultra', label: 'Ultra（自动任务委派）' },
+};
+
+function effortOptions(...levels: CodexReasoningEffort[]): ReasoningEffortOption[] {
+  return [DEFAULT_EFFORT_OPTION, ...levels.map((level) => CODEX_EFFORT_OPTIONS[level])];
+}
+
+const GPT_5_6_EFFORTS = effortOptions('low', 'medium', 'high', 'xhigh', 'max', 'ultra');
+const GPT_5_6_LUNA_EFFORTS = effortOptions('low', 'medium', 'high', 'xhigh', 'max');
+const LEGACY_CODEX_EFFORTS = effortOptions('low', 'medium', 'high');
 
 /**
  * Claude Code models. Pinned to concrete version ids (Claude Code's `--model`
@@ -37,10 +85,13 @@ const CLAUDE_MODELS: ModelOption[] = [
 
 /** Codex CLI models. Forwarded to `codex exec --model`. */
 const CODEX_MODELS: ModelOption[] = [
-  { value: DEFAULT_MODEL, label: '跟随默认（不指定）' },
-  { value: 'gpt-5-codex', label: 'GPT-5 Codex' },
-  { value: 'gpt-5', label: 'GPT-5' },
-  { value: 'o3', label: 'o3' },
+  { value: DEFAULT_MODEL, label: '跟随默认（不指定）', reasoningEfforts: GPT_5_6_EFFORTS },
+  { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol（旗舰）', reasoningEfforts: GPT_5_6_EFFORTS },
+  { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra（均衡）', reasoningEfforts: GPT_5_6_EFFORTS },
+  { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna（高效）', reasoningEfforts: GPT_5_6_LUNA_EFFORTS },
+  { value: 'gpt-5-codex', label: 'GPT-5 Codex（旧版）', reasoningEfforts: LEGACY_CODEX_EFFORTS },
+  { value: 'gpt-5', label: 'GPT-5（旧版）', reasoningEfforts: LEGACY_CODEX_EFFORTS },
+  { value: 'o3', label: 'o3（旧版）', reasoningEfforts: LEGACY_CODEX_EFFORTS },
 ];
 
 /** The model picker options for a profile's agent kind. */
@@ -86,4 +137,80 @@ export function resolveModelArg(
 export function modelLabel(agentKind: AgentKind, value: string | undefined): string {
   const normalized = normalizeModelSelection(agentKind, value);
   return supportedModels(agentKind).find((m) => m.value === normalized)?.label ?? normalized;
+}
+
+/** Reasoning-effort options supported by the selected Codex model. */
+export function supportedReasoningEfforts(
+  agentKind: AgentKind,
+  model: string | undefined,
+): ReasoningEffortOption[] {
+  if (agentKind !== 'codex') return [];
+  const normalizedModel = normalizeModelSelection(agentKind, model);
+  return CODEX_MODELS.find((item) => item.value === normalizedModel)?.reasoningEfforts
+    ?? [DEFAULT_EFFORT_OPTION];
+}
+
+/** Coerce a stored or submitted effort to a valid option for the selected model. */
+export function normalizeReasoningEffortSelection(
+  agentKind: AgentKind,
+  model: string | undefined,
+  value: string | undefined,
+): ReasoningEffortOption['value'] {
+  if (!value || value === DEFAULT_REASONING_EFFORT) return DEFAULT_REASONING_EFFORT;
+  return supportedReasoningEfforts(agentKind, model).some((option) => option.value === value)
+    ? (value as CodexReasoningEffort)
+    : DEFAULT_REASONING_EFFORT;
+}
+
+/** Resolve the Codex config override, or undefined for Claude/default. */
+export function resolveReasoningEffortArg(
+  agentKind: AgentKind,
+  model: string | undefined,
+  value: string | undefined,
+): CodexReasoningEffort | undefined {
+  const normalized = normalizeReasoningEffortSelection(agentKind, model, value);
+  return normalized === DEFAULT_REASONING_EFFORT ? undefined : normalized;
+}
+
+/** Picker label for a reasoning-effort value. */
+export function reasoningEffortLabel(
+  agentKind: AgentKind,
+  model: string | undefined,
+  value: string | undefined,
+): string {
+  const normalized = normalizeReasoningEffortSelection(agentKind, model, value);
+  return supportedReasoningEfforts(agentKind, model).find((item) => item.value === normalized)?.label
+    ?? normalized;
+}
+
+/**
+ * Resolve one run's effective model configuration. Session fields override
+ * profile fields independently; an absent session field inherits its profile
+ * counterpart, while the explicit `default` sentinel suppresses the CLI flag.
+ */
+export function resolveAgentModelConfig(
+  agentKind: AgentKind,
+  profile: AgentModelPreferences,
+  session: AgentModelPreferences = {},
+): ResolvedAgentModelConfig {
+  const modelPreference = session.model === undefined ? profile.model : session.model;
+  const modelSelection = normalizeModelSelection(agentKind, modelPreference);
+  const reasoningPreference = session.reasoningEffort === undefined
+    ? profile.reasoningEffort
+    : session.reasoningEffort;
+  const reasoningEffortSelection = normalizeReasoningEffortSelection(
+    agentKind,
+    modelSelection,
+    reasoningPreference,
+  );
+  return {
+    modelSelection,
+    reasoningEffortSelection,
+    model: resolveModelArg(agentKind, modelSelection),
+    reasoningEffort: resolveReasoningEffortArg(
+      agentKind,
+      modelSelection,
+      reasoningEffortSelection,
+    ),
+  };
 }

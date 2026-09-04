@@ -9,6 +9,7 @@ import { resolveAppPaths } from '../../../src/config/app-paths';
 import { getSecret, listSecretIds } from '../../../src/config/keystore';
 import {
   createDefaultProfileConfig,
+  type AgentKind,
   type RootConfig,
 } from '../../../src/config/profile-schema';
 import { runtimeProfileConfig } from '../../../src/config/profile-store';
@@ -90,27 +91,106 @@ describe('profile-aware account and config commands', () => {
     expect((root as unknown as { accounts?: unknown }).accounts).toBeUndefined();
   });
 
-  it('persists the picked model and clears it when "default" is chosen', async () => {
+  it('stores model choices on the current session without changing the profile default', async () => {
     vi.useFakeTimers();
-    const h = await createHarness();
+    const h = await createHarness({ preferences: { model: 'claude-sonnet-5' } });
 
     await h.command('/config submit', {
       model: 'claude-opus-4-8',
       message_reply: 'text',
     });
-    const withModel = await waitForRoot(h.rootDir, (candidate) =>
-      candidate.profiles.claude?.preferences.model === 'claude-opus-4-8',
-    );
-    expect(withModel.profiles.claude?.preferences.model).toBe('claude-opus-4-8');
+    await vi.waitFor(() => {
+      expect(h.sessions.getAgentPreferences('chat-1')).toEqual({ model: 'claude-opus-4-8' });
+    });
+    expect((await readRoot(h.rootDir)).profiles.claude?.preferences.model).toBe('claude-sonnet-5');
 
     await h.command('/config submit', {
       model: 'default',
       message_reply: 'text',
     });
-    const cleared = await waitForRoot(h.rootDir, (candidate) =>
-      candidate.profiles.claude?.preferences.model === undefined,
-    );
-    expect(cleared.profiles.claude?.preferences.model).toBeUndefined();
+    await vi.waitFor(() => {
+      expect(h.sessions.getAgentPreferences('chat-1')).toEqual({ model: 'default' });
+    });
+
+    await h.command('/config submit', {
+      model: 'inherit-profile',
+      message_reply: 'text',
+    });
+    await vi.waitFor(() => {
+      expect(h.sessions.getAgentPreferences('chat-1')).toEqual({});
+    });
+  });
+
+  it('keeps Codex model and reasoning choices isolated between session scopes', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness({
+      agentKind: 'codex',
+      preferences: { model: 'gpt-5.6-luna', reasoningEffort: 'low' },
+    });
+
+    await h.command('/config submit', {
+      model: 'gpt-5.6-sol',
+      reasoning_effort: 'ultra',
+      message_reply: 'text',
+    }, 'chat-sol');
+    await h.command('/config submit', {
+      model: 'gpt-5.6-terra',
+      reasoning_effort: 'high',
+      message_reply: 'text',
+    }, 'chat-terra');
+
+    await vi.waitFor(() => {
+      expect(h.sessions.getAgentPreferences('chat-sol')).toEqual({
+        model: 'gpt-5.6-sol',
+        reasoningEffort: 'ultra',
+      });
+      expect(h.sessions.getAgentPreferences('chat-terra')).toEqual({
+        model: 'gpt-5.6-terra',
+        reasoningEffort: 'high',
+      });
+    });
+    expect((await readRoot(h.rootDir)).profiles['codex-dev']?.preferences).toMatchObject({
+      model: 'gpt-5.6-luna',
+      reasoningEffort: 'low',
+    });
+  });
+
+  it('persists a model-compatible Codex reasoning effort for the current session', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness({ agentKind: 'codex' });
+
+    await h.command('/config submit', {
+      model: 'gpt-5.6-terra',
+      reasoning_effort: 'ultra',
+      message_reply: 'text',
+    });
+    await vi.waitFor(() => {
+      expect(h.sessions.getAgentPreferences('chat-1')).toEqual({
+        model: 'gpt-5.6-terra',
+        reasoningEffort: 'ultra',
+      });
+    });
+  });
+
+  it('drops Ultra when switching the same Codex profile to Luna', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness({
+      agentKind: 'codex',
+      preferences: { model: 'gpt-5.6-sol', reasoningEffort: 'ultra' },
+    });
+
+    await h.command('/config submit', {
+      model: 'gpt-5.6-luna',
+      reasoning_effort: 'ultra',
+      message_reply: 'text',
+    });
+    await vi.waitFor(() => {
+      expect(h.sessions.getAgentPreferences('chat-1')).toEqual({ model: 'gpt-5.6-luna' });
+    });
+    expect((await readRoot(h.rootDir)).profiles['codex-dev']?.preferences).toMatchObject({
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'ultra',
+    });
   });
 
   it('keeps the current message reply mode when the config submit payload omits it', async () => {
@@ -243,24 +323,27 @@ describe('profile-aware account and config commands', () => {
 });
 
 async function createHarness(options: {
+  agentKind?: AgentKind;
   preferences?: RootConfig['profiles'][string]['preferences'];
 } = {}): Promise<{
   rootDir: string;
   channel: ReturnType<typeof createFakeChannel>;
-  command(content: string, formValue?: Record<string, unknown>): Promise<boolean>;
+  sessions: SessionStore;
+  command(content: string, formValue?: Record<string, unknown>, scope?: string): Promise<boolean>;
 }> {
   const rootDir = await mkdtemp(join(tmpdir(), 'bridge-profile-config-command-'));
   roots.push(rootDir);
   const workspace = join(rootDir, 'workspace');
   await mkdir(workspace, { recursive: true });
-  const root = await writeRoot(rootDir, workspace, options.preferences);
-  const profileConfig = root.profiles.claude!;
-  const appPaths = resolveAppPaths({ rootDir, profile: 'claude' });
+  const profile = options.agentKind === 'codex' ? 'codex-dev' : 'claude';
+  const root = await writeRoot(rootDir, workspace, options.preferences, profile);
+  const profileConfig = root.profiles[profile]!;
+  const appPaths = resolveAppPaths({ rootDir, profile });
   const channel = createFakeChannel();
   const sessions = new SessionStore(appPaths.sessionsFile);
   const workspaces = new WorkspaceStore(appPaths.workspacesFile);
   const controls = {
-    profile: 'claude',
+    profile,
     profileConfig,
     botOwnerId: 'ou-admin',
     ownerRefreshState: 'ok',
@@ -268,18 +351,19 @@ async function createHarness(options: {
     restart: vi.fn(async () => {}),
     exit: vi.fn(async () => {}),
     configPath: appPaths.configFile,
-    cfg: runtimeProfileConfig(root, 'claude'),
+    cfg: runtimeProfileConfig(root, profile),
     processId: 'proc-1',
   } satisfies Controls;
 
   return {
     rootDir,
     channel,
-    command: (content: string, formValue?: Record<string, unknown>) =>
+    sessions,
+    command: (content: string, formValue?: Record<string, unknown>, scope = 'chat-1') =>
       tryHandleCommand({
         channel: channel as unknown as CommandContext['channel'],
-        msg: message(content),
-        scope: 'chat-1',
+        msg: message(content, scope),
+        scope,
         chatMode: 'p2p',
         sessions,
         workspaces,
@@ -296,10 +380,11 @@ async function writeRoot(
   rootDir: string,
   workspace: string,
   preferences: RootConfig['profiles'][string]['preferences'] = {},
+  activeProfile = 'claude',
 ): Promise<RootConfig> {
   const root: RootConfig = {
     schemaVersion: 2,
-    activeProfile: 'claude',
+    activeProfile,
     preferences: {},
     profiles: {
       claude: createDefaultProfileConfig({
@@ -318,13 +403,13 @@ async function writeRoot(
       }),
     },
   };
-  root.profiles.claude!.workspaces.default = workspace;
-  root.profiles.claude!.preferences = {
-    ...root.profiles.claude!.preferences,
+  root.profiles[activeProfile]!.workspaces.default = workspace;
+  root.profiles[activeProfile]!.preferences = {
+    ...root.profiles[activeProfile]!.preferences,
     ...preferences,
   };
   await writeJson(resolveAppPaths({ rootDir }).configFile, root);
-  await writeFile(join(rootDir, 'active-profile'), 'claude\n', 'utf8');
+  await writeFile(join(rootDir, 'active-profile'), `${activeProfile}\n`, 'utf8');
   return root;
 }
 
@@ -369,10 +454,10 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-function message(content: string): NormalizedMessage {
+function message(content: string, chatId = 'chat-1'): NormalizedMessage {
   return {
     messageId: `om-${content.replace(/\W+/g, '-').slice(0, 20)}`,
-    chatId: 'chat-1',
+    chatId,
     chatType: 'p2p',
     senderId: 'ou-admin',
     senderName: 'Admin',

@@ -4,7 +4,14 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
-import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
+import {
+  INHERIT_PROFILE_SELECTION,
+  normalizeModelSelection,
+  normalizeReasoningEffortSelection,
+  resolveAgentModelConfig,
+  supportedModels,
+  supportedReasoningEfforts,
+} from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import {
@@ -1737,13 +1744,36 @@ async function showConfigForm(ctx: CommandContext): Promise<void> {
   // alive so we don't advertise a stale address.
   const sidecar = await readUiSidecar(commandProfilePaths(ctx).hostUiFile).catch(() => undefined);
   const consoleUrl = sidecar && isAlive(sidecar.pid) ? sidecar.url : undefined;
+  const agentKind = ctx.controls.profileConfig.agentKind;
+  const profileModel = normalizeModelSelection(
+    agentKind,
+    ctx.controls.cfg.preferences?.model,
+  );
+  const profileReasoningEffort = normalizeReasoningEffortSelection(
+    agentKind,
+    profileModel,
+    ctx.controls.cfg.preferences?.reasoningEffort,
+  );
+  const sessionPreferences = ctx.sessions.getAgentPreferences(ctx.scope);
+  const sessionModel = sessionPreferences.model !== undefined
+    && supportedModels(agentKind).some((option) => option.value === sessionPreferences.model)
+    ? sessionPreferences.model
+    : INHERIT_PROFILE_SELECTION;
+  const effectiveModel = sessionModel === INHERIT_PROFILE_SELECTION
+    ? profileModel
+    : sessionModel;
+  const sessionReasoningEffort = sessionPreferences.reasoningEffort !== undefined
+    && supportedReasoningEfforts(agentKind, effectiveModel)
+      .some((option) => option.value === sessionPreferences.reasoningEffort)
+    ? sessionPreferences.reasoningEffort
+    : INHERIT_PROFILE_SELECTION;
   const card = configFormCard({
-    agentKind: ctx.controls.profileConfig.agentKind,
+    agentKind,
     mode: ctx.controls.profileConfig.mode,
-    model: normalizeModelSelection(
-      ctx.controls.profileConfig.agentKind,
-      ctx.controls.cfg.preferences?.model,
-    ),
+    model: sessionModel,
+    profileModel,
+    reasoningEffort: sessionReasoningEffort,
+    profileReasoningEffort,
     messageReply: getMessageReplyMode(ctx.controls.cfg),
     showToolCalls: getShowToolCalls(ctx.controls.cfg),
     cotMessages: getCotMessages(ctx.controls.cfg),
@@ -1798,16 +1828,61 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       : getMessageReplyMode(ctx.controls.cfg);
   const rawTools = String(fv.show_tool_calls ?? '').trim();
   const showToolCalls = rawTools !== 'hide';
-  // Parse the model picker. Unexpected / empty values keep the current
-  // selection. Store `undefined` for the "default" sentinel to keep config
-  // tidy (resolveModelArg treats both the same way).
+  // Model and reasoning selections belong to this conversation scope. The
+  // profile values remain defaults for scopes that choose "inherit-profile".
   const agentKind = ctx.controls.profileConfig.agentKind;
+  const profilePreferences = ctx.controls.cfg.preferences ?? {};
+  const profileModel = normalizeModelSelection(agentKind, profilePreferences.model);
+  const profileReasoningEffort = normalizeReasoningEffortSelection(
+    agentKind,
+    profileModel,
+    profilePreferences.reasoningEffort,
+  );
+  const currentSessionPreferences = ctx.sessions.getAgentPreferences(ctx.scope);
+  const currentSessionModel = currentSessionPreferences.model !== undefined
+    && supportedModels(agentKind).some((option) => option.value === currentSessionPreferences.model)
+    ? currentSessionPreferences.model
+    : undefined;
   const rawModel = String(fv.model ?? '').trim();
-  const modelValid = rawModel !== '' && supportedModels(agentKind).some((m) => m.value === rawModel);
-  const modelSelection = modelValid
-    ? rawModel
-    : normalizeModelSelection(agentKind, ctx.controls.cfg.preferences?.model);
-  const model = modelSelection === DEFAULT_MODEL ? undefined : modelSelection;
+  const sessionModelSelection = rawModel === INHERIT_PROFILE_SELECTION
+    ? INHERIT_PROFILE_SELECTION
+    : supportedModels(agentKind).some((option) => option.value === rawModel)
+      ? rawModel
+      : currentSessionModel ?? INHERIT_PROFILE_SELECTION;
+  // Unlike profile config, keep the explicit `default` sentinel: it means this
+  // session deliberately ignores a pinned profile model and follows the CLI.
+  const sessionModel = sessionModelSelection === INHERIT_PROFILE_SELECTION
+    ? undefined
+    : sessionModelSelection;
+  const effectiveModel = sessionModel ?? profileModel;
+  // Reasoning effort is Codex-only and model-specific. If the submitted value
+  // is unsupported (for example Ultra with Luna), retain the current value if
+  // it is valid for the newly selected model, otherwise inherit the profile.
+  const currentSessionReasoningEffort = currentSessionPreferences.reasoningEffort !== undefined
+    && supportedReasoningEfforts(agentKind, effectiveModel)
+      .some((option) => option.value === currentSessionPreferences.reasoningEffort)
+    ? currentSessionPreferences.reasoningEffort
+    : undefined;
+  const rawReasoningEffort = String(fv.reasoning_effort ?? '').trim();
+  const reasoningEffortValid = supportedReasoningEfforts(agentKind, effectiveModel)
+    .some((option) => option.value === rawReasoningEffort);
+  const sessionReasoningEffortSelection = agentKind !== 'codex'
+    ? INHERIT_PROFILE_SELECTION
+    : rawReasoningEffort === INHERIT_PROFILE_SELECTION
+      ? INHERIT_PROFILE_SELECTION
+      : reasoningEffortValid
+        ? rawReasoningEffort
+        : currentSessionReasoningEffort ?? INHERIT_PROFILE_SELECTION;
+  // Keep `default` here too, because it explicitly suppresses a profile-level
+  // reasoning override for this scope.
+  const sessionReasoningEffort = sessionReasoningEffortSelection === INHERIT_PROFILE_SELECTION
+    ? undefined
+    : sessionReasoningEffortSelection;
+  const effectiveAgentModel = resolveAgentModelConfig(
+    agentKind,
+    profilePreferences,
+    { model: sessionModel, reasoningEffort: sessionReasoningEffort },
+  );
   const rawCotMessages = String(fv.cot_messages ?? '').trim();
   const cotMessages =
     rawCotMessages === 'brief'
@@ -1886,7 +1961,6 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
 
     const nextPreferences: AppPreferences = {
       ...(ctx.controls.cfg.preferences ?? {}),
-      model,
       messageReply,
       // Mark the messageReply value as living in the new (post-0.1.27)
       // semantic — `text` now means real plain text, not the lightweight
@@ -1913,6 +1987,10 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
         failureStep = 'config.save';
       }
       await savePreferencesConfig(ctx, nextPreferences, requireMentionInGroup, larkCliIdentity, mode);
+      ctx.sessions.setAgentPreferences(ctx.scope, {
+        model: sessionModel,
+        reasoningEffort: sessionReasoningEffort,
+      });
     } catch (err) {
       let rollbackFailed = false;
       if (larkCliIdentityChanged) {
@@ -1937,7 +2015,12 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
     }
 
     log.info('command', 'config-saved', {
+      scope: ctx.scope,
       mode,
+      sessionModel: sessionModelSelection,
+      sessionReasoningEffort: sessionReasoningEffortSelection,
+      effectiveModel: effectiveAgentModel.modelSelection,
+      effectiveReasoningEffort: effectiveAgentModel.reasoningEffortSelection,
       messageReply,
       showToolCalls,
       cotMessages,
@@ -1956,7 +2039,10 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       configSavedCard({
         agentKind,
         mode,
-        model: modelSelection,
+        model: sessionModelSelection,
+        profileModel,
+        reasoningEffort: sessionReasoningEffortSelection,
+        profileReasoningEffort,
         messageReply,
         showToolCalls,
         cotMessages,

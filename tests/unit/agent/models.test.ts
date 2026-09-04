@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MODEL,
+  DEFAULT_REASONING_EFFORT,
   isDefaultModel,
   modelLabel,
   normalizeModelSelection,
+  normalizeReasoningEffortSelection,
+  reasoningEffortLabel,
+  resolveAgentModelConfig,
   resolveModelArg,
+  resolveReasoningEffortArg,
   supportedModels,
+  supportedReasoningEfforts,
 } from '../../../src/agent/models.js';
 
 describe('agent model catalog', () => {
@@ -15,7 +21,11 @@ describe('agent model catalog', () => {
     expect(claude[0]?.value).toBe(DEFAULT_MODEL);
     expect(codex[0]?.value).toBe(DEFAULT_MODEL);
     expect(claude.map((m) => m.value)).toContain('claude-opus-4-8');
-    expect(codex.map((m) => m.value)).toContain('gpt-5-codex');
+    expect(codex.map((m) => m.value)).toEqual(expect.arrayContaining([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+    ]));
     expect(claude.map((m) => m.value)).not.toContain('gpt-5-codex');
   });
 
@@ -44,5 +54,60 @@ describe('agent model catalog', () => {
   it('labels a stored value using the picker option text', () => {
     expect(modelLabel('claude', 'claude-opus-4-8')).toBe('Opus 4.8（最新）');
     expect(modelLabel('claude', DEFAULT_MODEL)).toContain('跟随默认');
+  });
+
+  it('offers model-specific GPT-5.6 reasoning efforts', () => {
+    const sol = supportedReasoningEfforts('codex', 'gpt-5.6-sol').map((item) => item.value);
+    const terra = supportedReasoningEfforts('codex', 'gpt-5.6-terra').map((item) => item.value);
+    const luna = supportedReasoningEfforts('codex', 'gpt-5.6-luna').map((item) => item.value);
+
+    expect(sol).toEqual([
+      DEFAULT_REASONING_EFFORT,
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max',
+      'ultra',
+    ]);
+    expect(terra).toContain('ultra');
+    expect(luna).toContain('max');
+    expect(luna).not.toContain('ultra');
+    expect(supportedReasoningEfforts('claude', 'claude-opus-4-8')).toEqual([]);
+  });
+
+  it('normalizes and resolves reasoning effort for the selected model', () => {
+    expect(normalizeReasoningEffortSelection('codex', 'gpt-5.6-sol', 'ultra')).toBe('ultra');
+    expect(normalizeReasoningEffortSelection('codex', 'gpt-5.6-luna', 'ultra')).toBe(
+      DEFAULT_REASONING_EFFORT,
+    );
+    expect(resolveReasoningEffortArg('codex', 'gpt-5.6-terra', 'xhigh')).toBe('xhigh');
+    expect(resolveReasoningEffortArg('codex', 'gpt-5.6-luna', 'ultra')).toBeUndefined();
+    expect(resolveReasoningEffortArg('claude', 'claude-opus-4-8', 'high')).toBeUndefined();
+    expect(reasoningEffortLabel('codex', 'gpt-5.6-sol', 'ultra')).toContain('Ultra');
+  });
+
+  it('resolves per-session choices over profile defaults independently', () => {
+    expect(resolveAgentModelConfig(
+      'codex',
+      { model: 'gpt-5.6-luna', reasoningEffort: 'low' },
+      { model: 'gpt-5.6-sol', reasoningEffort: 'ultra' },
+    )).toMatchObject({
+      modelSelection: 'gpt-5.6-sol',
+      reasoningEffortSelection: 'ultra',
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'ultra',
+    });
+
+    expect(resolveAgentModelConfig(
+      'codex',
+      { model: 'gpt-5.6-terra', reasoningEffort: 'high' },
+      { model: DEFAULT_MODEL, reasoningEffort: DEFAULT_REASONING_EFFORT },
+    )).toMatchObject({
+      modelSelection: DEFAULT_MODEL,
+      reasoningEffortSelection: DEFAULT_REASONING_EFFORT,
+      model: undefined,
+      reasoningEffort: undefined,
+    });
   });
 });

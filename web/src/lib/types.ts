@@ -33,6 +33,12 @@ export interface ProfileInfo {
 export interface ModelOption {
   value: string;
   label: string;
+  reasoningEfforts?: ReasoningEffortOption[];
+}
+
+export interface ReasoningEffortOption {
+  value: string;
+  label: string;
 }
 
 export interface ConfigView {
@@ -41,6 +47,7 @@ export interface ConfigView {
   mode: ProfileMode;
   model: string;
   models: ModelOption[];
+  reasoningEffort: string;
   messageReply: MessageReply;
   showToolCalls: boolean;
   cotMessages: CotMessages;

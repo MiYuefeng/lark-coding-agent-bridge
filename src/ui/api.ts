@@ -41,7 +41,15 @@ import {
   type ProfileAccess,
   type ProfileMode,
 } from '../config/profile-schema';
-import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
+import {
+  DEFAULT_MODEL,
+  DEFAULT_REASONING_EFFORT,
+  normalizeModelSelection,
+  normalizeReasoningEffortSelection,
+  supportedModels,
+  supportedReasoningEfforts,
+  type ModelOption,
+} from '../agent/models';
 import { log } from '../core/logger';
 import { HttpError } from './http';
 import type { UiRuntime } from './types';
@@ -55,7 +63,8 @@ export interface ConfigView {
   agentKind: string;
   mode: ProfileMode;
   model: string;
-  models: { value: string; label: string }[];
+  models: ModelOption[];
+  reasoningEffort: string;
   messageReply: MessageReplyMode;
   showToolCalls: boolean;
   cotMessages: CotMessagesMode;
@@ -79,12 +88,18 @@ export interface ConfigView {
 export function buildConfigView(state: MutableProfileState, live = false): ConfigView {
   const agentKind = state.profileConfig.agentKind;
   const ms = getRunIdleTimeoutMs(state.cfg);
+  const model = normalizeModelSelection(agentKind, state.cfg.preferences?.model);
   return {
     profile: state.profile,
     agentKind,
     mode: state.profileConfig.mode,
-    model: normalizeModelSelection(agentKind, state.cfg.preferences?.model),
+    model,
     models: supportedModels(agentKind),
+    reasoningEffort: normalizeReasoningEffortSelection(
+      agentKind,
+      model,
+      state.cfg.preferences?.reasoningEffort,
+    ),
     messageReply: getMessageReplyMode(state.cfg),
     showToolCalls: getShowToolCalls(state.cfg),
     cotMessages: getCotMessages(state.cfg),
@@ -218,6 +233,19 @@ function parseConfigBody(state: MutableProfileState, body: unknown): ParsedConfi
     ? rawModel
     : normalizeModelSelection(agentKind, state.cfg.preferences?.model);
   const model = modelSelection === DEFAULT_MODEL ? undefined : modelSelection;
+  const rawReasoningEffort = typeof fv.reasoningEffort === 'string' ? fv.reasoningEffort : '';
+  const reasoningEffortValid = supportedReasoningEfforts(agentKind, modelSelection)
+    .some((option) => option.value === rawReasoningEffort);
+  const reasoningEffortSelection = reasoningEffortValid
+    ? rawReasoningEffort
+    : normalizeReasoningEffortSelection(
+        agentKind,
+        modelSelection,
+        state.cfg.preferences?.reasoningEffort,
+      );
+  const reasoningEffort = reasoningEffortSelection === DEFAULT_REASONING_EFFORT
+    ? undefined
+    : reasoningEffortSelection;
 
   const messageReply: MessageReplyMode =
     fv.messageReply === 'markdown' || fv.messageReply === 'text' || fv.messageReply === 'card'
@@ -266,6 +294,7 @@ function parseConfigBody(state: MutableProfileState, body: unknown): ParsedConfi
     nextPreferences: {
       ...(state.cfg.preferences ?? {}),
       model,
+      reasoningEffort,
       messageReply,
       messageReplyMigrated: true,
       showToolCalls,

@@ -108,12 +108,17 @@ export interface AppPreferences {
    */
   showToolCalls?: boolean;
   /**
-   * Model the underlying agent runs with, forwarded as `--model`. The catalog
-   * of valid values is agent-kind specific — see `agent/models.ts`. `undefined`
-   * or the `'default'` sentinel means "don't pass `--model`" so the agent
-   * CLI / account default applies. Default: unset.
+   * Profile-level default model. A conversation scope may override it in the
+   * SessionStore. Forwarded as `--model`; `undefined` or `'default'` omits the
+   * flag so the agent CLI / account default applies.
    */
   model?: string;
+  /**
+   * Profile-level default Codex reasoning effort. A conversation scope may
+   * override it in the SessionStore. Forwarded as `model_reasoning_effort`;
+   * undefined or `'default'` leaves the Codex/account default unchanged.
+   */
+  reasoningEffort?: string;
   /**
    * Whether to send a separate Lark COT process message before the final
    * answer. `brief` mirrors the lightweight tool/progress visibility from

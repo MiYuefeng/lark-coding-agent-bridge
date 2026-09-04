@@ -21,6 +21,8 @@ describe('RunExecutor policy runtime options', () => {
 
     const execution = await executor.submit({
       scopeId: 'scope-policy',
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'xhigh',
       policy: policy({
         sandbox: 'workspace-write',
         permissionMode: 'acceptEdits',
@@ -29,6 +31,8 @@ describe('RunExecutor policy runtime options', () => {
 
     expect(agent.runOptions[0]).toMatchObject({
       runId: 'run-policy',
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'xhigh',
       sandbox: 'workspace-write',
       permissionMode: 'acceptEdits',
     });

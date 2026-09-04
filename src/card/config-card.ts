@@ -1,4 +1,12 @@
-import { modelLabel, supportedModels } from '../agent/models';
+import {
+  DEFAULT_MODEL,
+  INHERIT_PROFILE_SELECTION,
+  modelLabel,
+  normalizeReasoningEffortSelection,
+  reasoningEffortLabel,
+  supportedModels,
+  supportedReasoningEfforts,
+} from '../agent/models';
 import type { KnownChat } from '../bot/lark-info';
 import type { AgentKind, LarkCliIdentityPreset, ProfileMode } from '../config/profile-schema';
 import type { CotMessagesMode, MessageReplyMode } from '../config/schema';
@@ -8,8 +16,14 @@ export interface ConfigFormOpts {
   agentKind: AgentKind;
   /** Deployment mode: 'personal' (default) or 'team'. */
   mode: ProfileMode;
-  /** Current model selection (a value from {@link supportedModels}). */
+  /** Current session model selection, or `inherit-profile`. */
   model: string;
+  /** Model used when this session follows the profile default. */
+  profileModel: string;
+  /** Current session Codex effort selection, or `inherit-profile`. */
+  reasoningEffort?: string;
+  /** Effort used when this session follows the profile default. */
+  profileReasoningEffort?: string;
   messageReply: MessageReplyMode;
   showToolCalls: boolean;
   cotMessages: CotMessagesMode;
@@ -65,6 +79,14 @@ function chatList(chatIds: string[], knownChats: KnownChat[]): string {
 /** Form card for `/config`. */
 export function configFormCard(opts: ConfigFormOpts): object {
   const teamMode = opts.mode === 'team';
+  const effectiveModel = opts.model === INHERIT_PROFILE_SELECTION
+    ? opts.profileModel
+    : opts.model;
+  const inheritedEffort = normalizeReasoningEffortSelection(
+    opts.agentKind,
+    effectiveModel,
+    opts.profileReasoningEffort,
+  );
   const teamOverrideNote =
     '\n\n_⚠️ 团队版已开启：本项被覆盖 —— 身份强制为「只允许应用身份」、访问控制不生效。切回个人版后恢复。_';
   const accessElements: object[] = [
@@ -119,7 +141,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
           tag: 'markdown',
           content:
             '⚙️ **偏好设置**\n\n' +
-            '调整 bot 的行为偏好。改完点提交后写入当前 profile 配置；消息和访问控制设置立即生效。',
+            '模型和推理强度只覆盖**当前会话**；其余设置写入当前 Profile。提交后从下一条消息开始生效。',
         },
         ...(opts.consoleUrl
           ? [
@@ -156,19 +178,70 @@ export function configFormCard(opts: ConfigFormOpts): object {
             {
               tag: 'markdown',
               content:
-                '**模型**\n' +
-                '_底层 agent 运行使用的模型_\n' +
-                '_「跟随默认」= 不指定,由 CLI/账号决定_',
+                '**当前会话模型**\n' +
+                `_Profile 默认：${modelLabel(opts.agentKind, opts.profileModel)}_\n` +
+                '_「跟随 Profile 默认」会随 Profile 配置变化；「CLI/账号默认」会在本会话中明确不指定模型_',
             },
             {
               tag: 'select_static',
               name: 'model',
               initial_option: opts.model,
-              options: supportedModels(opts.agentKind).map((m) => ({
-                text: { tag: 'plain_text', content: m.label },
-                value: m.value,
-              })),
+              options: [
+                {
+                  text: {
+                    tag: 'plain_text',
+                    content: `跟随 Profile 默认（${modelLabel(opts.agentKind, opts.profileModel)}）`,
+                  },
+                  value: INHERIT_PROFILE_SELECTION,
+                },
+                ...supportedModels(opts.agentKind).map((m) => ({
+                  text: {
+                    tag: 'plain_text',
+                    content: m.value === DEFAULT_MODEL ? 'CLI/账号默认（本会话不指定）' : m.label,
+                  },
+                  value: m.value,
+                })),
+              ],
             },
+            ...(opts.agentKind === 'codex'
+              ? [
+                  {
+                    tag: 'markdown',
+                    content:
+                      '\n**当前会话推理强度**\n' +
+                      `_Profile 默认：${reasoningEffortLabel(opts.agentKind, effectiveModel, inheritedEffort)}_\n` +
+                      '_「跟随 Profile 默认」会继承 Profile；「Codex 默认」会在本会话中明确不覆盖_\n' +
+                      '_Ultra 会启用自动任务委派，仅 GPT-5.6 Sol / Terra 支持；Luna 最高为 Max_',
+                  },
+                  {
+                    tag: 'select_static',
+                    name: 'reasoning_effort',
+                    initial_option: opts.reasoningEffort ?? INHERIT_PROFILE_SELECTION,
+                    // Feishu forms do not dynamically rebuild one select when
+                    // another changes. Show the full Codex set so a user can
+                    // switch Luna -> Sol/Terra and pick Ultra in one submit;
+                    // the submit handler still validates the selected pair.
+                    options: [
+                      {
+                        text: {
+                          tag: 'plain_text',
+                          content: `跟随 Profile 默认（${reasoningEffortLabel(opts.agentKind, effectiveModel, inheritedEffort)}）`,
+                        },
+                        value: INHERIT_PROFILE_SELECTION,
+                      },
+                      ...supportedReasoningEfforts(opts.agentKind, 'default').map((effort) => ({
+                        text: {
+                          tag: 'plain_text',
+                          content: effort.value === 'default'
+                            ? 'Codex 默认（本会话不覆盖）'
+                            : effort.label,
+                        },
+                        value: effort.value,
+                      })),
+                    ],
+                  },
+                ]
+              : []),
             { tag: 'hr' },
             {
               tag: 'markdown',
@@ -338,6 +411,19 @@ export function configSavedCard(opts: ConfigFormOpts): object {
   const summarize = (list: string[]): string =>
     list.length === 0 ? '_(空)_' : `${list.length} 项`;
   const cotLabel = cotMessagesLabel(opts.cotMessages);
+  const effectiveModel = opts.model === INHERIT_PROFILE_SELECTION
+    ? opts.profileModel
+    : opts.model;
+  const modelSummary = opts.model === INHERIT_PROFILE_SELECTION
+    ? `跟随 Profile 默认 · ${modelLabel(opts.agentKind, opts.profileModel)}`
+    : modelLabel(opts.agentKind, opts.model);
+  const effortSummary = opts.reasoningEffort === INHERIT_PROFILE_SELECTION
+    ? `跟随 Profile 默认 · ${reasoningEffortLabel(
+        opts.agentKind,
+        effectiveModel,
+        opts.profileReasoningEffort,
+      )}`
+    : reasoningEffortLabel(opts.agentKind, effectiveModel, opts.reasoningEffort);
   return {
     schema: '2.0',
     config: { summary: { content: '偏好已保存' } },
@@ -348,7 +434,10 @@ export function configSavedCard(opts: ConfigFormOpts): object {
           content:
             '✅ **偏好已保存**\n\n' +
             `**运行模式**:\`${opts.mode === 'team' ? '团队版' : '个人版'}\`\n` +
-            `**模型**:\`${modelLabel(opts.agentKind, opts.model)}\`\n` +
+            `**当前会话模型**:\`${modelSummary}\`\n` +
+            (opts.agentKind === 'codex'
+              ? `**当前会话推理强度**:\`${effortSummary}\`\n`
+              : '') +
             `**消息回复方式**:${replyLabel}\n` +
             `**工具调用显示**:\`${opts.showToolCalls ? 'show' : 'hide'}\`\n` +
             `**COT 过程消息**:\`${cotLabel}\`\n` +

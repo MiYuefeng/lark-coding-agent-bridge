@@ -79,6 +79,7 @@ export function ConfigView({ profile }: { profile: string }) {
         mode: cfg.mode,
         meeting: cfg.meeting,
         model: cfg.model,
+        reasoningEffort: cfg.reasoningEffort,
         messageReply: cfg.messageReply,
         showToolCalls: cfg.showToolCalls,
         cotMessages: cfg.cotMessages,
@@ -94,6 +95,15 @@ export function ConfigView({ profile }: { profile: string }) {
     } finally {
       setSaving(false);
     }
+  }
+
+  function setModel(model: string) {
+    if (!cfg) return;
+    const options = cfg.models.find((item) => item.value === model)?.reasoningEfforts ?? [];
+    const reasoningEffort = options.some((item) => item.value === cfg.reasoningEffort)
+      ? cfg.reasoningEffort
+      : "default";
+    setCfg({ ...cfg, model, reasoningEffort });
   }
 
   async function access(action: "add" | "remove", kind: "user" | "admin" | "chat", id: string) {
@@ -142,10 +152,17 @@ export function ConfigView({ profile }: { profile: string }) {
       <Card>
         <CardHeader><CardTitle>回复与运行</CardTitle></CardHeader>
         <CardContent className="space-y-4">
-          <Field label="模型">
-            <SelectRow value={cfg.model} onChange={(v) => set("model", v)}
+          <Field label="Profile 默认模型" hint="新会话默认使用此模型；在飞书各会话的 /config 中可单独覆盖。">
+            <SelectRow value={cfg.model} onChange={setModel}
               options={cfg.models.map((m) => [m.value, m.label])} />
           </Field>
+          {cfg.agentKind === "codex" && (
+            <Field label="Profile 默认推理强度" hint="新会话默认使用此强度，可在各会话中单独覆盖。Ultra 仅 GPT-5.6 Sol / Terra 支持；Luna 最高为 Max。">
+              <SelectRow value={cfg.reasoningEffort} onChange={(v) => set("reasoningEffort", v)}
+                options={(cfg.models.find((m) => m.value === cfg.model)?.reasoningEfforts ?? [])
+                  .map((effort) => [effort.value, effort.label])} />
+            </Field>
+          )}
           <Field label="消息回复方式">
             <SelectRow value={cfg.messageReply} onChange={(v) => set("messageReply", v as ConfigData["messageReply"])}
               options={[["markdown", "消息卡片（默认）"], ["text", "纯文本"]]} />

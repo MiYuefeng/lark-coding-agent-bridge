@@ -126,6 +126,25 @@ describe('Codex argv contract', () => {
     expect(buildCodexArgs({ cwd: '/repo', sandbox: 'read-only' })).not.toContain('--model');
   });
 
+  it('forwards reasoning effort as a global Codex config override', () => {
+    const args = buildCodexArgs({
+      cwd: '/repo',
+      sandbox: 'workspace-write',
+      threadId: 'thread-123',
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'ultra',
+    });
+    const effortIdx = args.indexOf('model_reasoning_effort="ultra"');
+    expect(effortIdx).toBeGreaterThan(0);
+    expect(args[effortIdx - 1]).toBe('-c');
+    expect(effortIdx).toBeLessThan(args.indexOf('resume'));
+  });
+
+  it('omits the reasoning override when the default is selected', () => {
+    expect(buildCodexArgs({ cwd: '/repo', sandbox: 'read-only' }).join(' '))
+      .not.toContain('model_reasoning_effort');
+  });
+
   it('can explicitly ignore the user config when profile isolation asks for it', () => {
     expect(
       buildCodexArgs({

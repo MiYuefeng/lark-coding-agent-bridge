@@ -145,7 +145,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/ws remove <name>` | Delete a named workspace |
 | `/resume` | Resume compatible history for the same agent, working directory, and permission mode |
 | `/status` | Show profile, agent, working directory, session, lark-cli identity, and run state |
-| `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
+| `/config` | Choose model/reasoning for this session and adjust profile-wide presentation, access, and lark-cli identity settings |
 | `/invite user @name` | Allow a user to use the bot in DMs |
 | `/invite admin @name` | Add an access-control admin |
 | `/invite group` | Allow the current group to use the bot |
@@ -161,9 +161,15 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 
 DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
 
+## Model and reasoning effort
+
+Model and reasoning selections in `/config` are **scoped to the current conversation**. DMs, regular group chats, and topics have separate scopes, so concurrent sessions can run different models. Codex profiles offer `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` alongside legacy options. Reasoning effort supports `low`, `medium`, `high`, `xhigh`, and `max`; Sol and Terra additionally support `ultra`, which enables automatic task delegation, while Luna supports up to `max`.
+
+**Follow Profile default** inherits the value configured in the web console or profile config. **CLI/account default** explicitly omits that CLI override for only this session. Changes apply to the next run, including a resumed conversation, and do not alter an already-running task. `/new`, `/cd`, and `/ws use` clear these session-level overrides when they reset the conversation. Model and reasoning settings in the web console remain profile defaults.
+
 ## Reply Display and COT
 
-`/config` controls three presentation settings:
+`/config` also controls three presentation settings:
 
 - **Message reply mode**: `message card` streams the final reply; `plain text` sends once after the run finishes.
 - **Tool-call display**: controls whether tool blocks appear in the final card / markdown reply.

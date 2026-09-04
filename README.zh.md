@@ -145,7 +145,7 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 | `/ws remove <name>` | 删除命名工作空间 |
 | `/resume` | 恢复同 agent、工作目录、权限模式兼容的历史会话 |
 | `/status` | 查看 profile、agent、工作目录、会话、lark-cli 身份和运行状态 |
-| `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
+| `/config` | 为当前会话选择模型/推理强度，并调整 Profile 级展示、访问控制和 lark-cli 身份策略 |
 | `/invite user @某人` | 允许用户私聊使用 bot |
 | `/invite admin @某人` | 添加访问控制管理员 |
 | `/invite group` | 允许当前群使用 bot |
@@ -161,9 +161,15 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
 
+## 模型与推理强度
+
+`/config` 中的模型和推理强度是**当前会话独立配置**：私聊、普通群、话题分别使用自己的 scope，因此可以同时让不同会话运行不同模型。Codex profile 可选 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`，并保留旧模型选项。推理强度可选 `low`、`medium`、`high`、`xhigh`、`max`；Sol 和 Terra 还支持会自动委派任务的 `ultra`，Luna 最高支持 `max`。
+
+选择“跟随 Profile 默认”会继承 Web 控制台或 profile 配置中的默认值；选择“CLI/账号默认”则只在当前会话中明确省略对应 CLI 参数。修改从下一次 run 开始生效，包括恢复中的会话，不会改变正在运行的任务。`/new`、`/cd` 或 `/ws use` 重置会话时也会清除这两个会话级覆盖。Web 控制台中的模型和推理强度仍是 Profile 默认值。
+
 ## 回复展示与 COT
 
-`/config` 可以调整三类展示选项：
+`/config` 还可以调整三类展示选项：
 
 - **消息回复方式**：`消息卡片` 流式更新最终回复；`纯文本` 在 run 完成后一次性发送。
 - **工具调用显示**：控制最终回复卡片 / markdown 中是否展示工具块。
