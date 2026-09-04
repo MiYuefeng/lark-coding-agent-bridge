@@ -33,6 +33,12 @@ npm i -g lark-channel-bridge
 pnpm add -g lark-channel-bridge
 ```
 
+直接从 GitHub 安装 MiYuefeng 的会话模型版本：
+
+```bash
+npm install -g https://github.com/MiYuefeng/lark-coding-agent-bridge/releases/download/v0.7.2-session-model.0/lark-channel-bridge-0.7.2-session-model.0.tgz
+```
+
 ## 首次启动
 
 ```bash

@@ -33,6 +33,12 @@ npm i -g lark-channel-bridge
 pnpm add -g lark-channel-bridge
 ```
 
+To install the MiYuefeng session-model release directly from GitHub:
+
+```bash
+npm install -g https://github.com/MiYuefeng/lark-coding-agent-bridge/releases/download/v0.7.2-session-model.0/lark-channel-bridge-0.7.2-session-model.0.tgz
+```
+
 ## First run
 
 ```bash
