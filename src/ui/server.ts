@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { log } from '../core/logger';
+import { refreshModelCatalogForProfile } from '../agent/model-discovery';
+import { resolveAppPaths } from '../config/app-paths';
 import { readActiveProfile } from '../config/profile-store';
 import type { MutableProfileState } from '../config/config-ops';
 import consoleHtml from './generated/index.html';
@@ -206,11 +208,13 @@ async function route(
   // --- per-profile config ---
   if (path === '/api/config' && g) {
     const { state, live } = await resolveTargetState(deps, url);
+    await refreshConfigModelCatalog(state, deps.rootDir);
     sendJson(res, 200, buildConfigView(state, live));
     return;
   }
   if (path === '/api/config' && p) {
     const { state, live, controls } = await resolveTargetState(deps, url);
+    await refreshConfigModelCatalog(state, deps.rootDir);
     const body = await readJsonBody(req);
     sendJson(res, 200, live && controls ? await applyConfig(controls, body) : await applyConfigToDisk(state, body));
     return;
@@ -303,4 +307,12 @@ async function route(
   }
 
   sendJson(res, 404, { error: 'not found' });
+}
+
+async function refreshConfigModelCatalog(
+  state: MutableProfileState,
+  rootDir: string | undefined,
+): Promise<void> {
+  const profileDir = resolveAppPaths({ rootDir, profile: state.profile }).profileDir;
+  await refreshModelCatalogForProfile(state.profileConfig, profileDir);
 }

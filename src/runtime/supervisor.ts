@@ -5,6 +5,7 @@ import type { AppPaths } from '../config/app-paths';
 import { isComplete, type AppConfig } from '../config/schema';
 import type { AgentKind, ProfileConfig } from '../config/profile-schema';
 import type { AgentAdapter } from '../agent/types';
+import { refreshModelCatalogForProfile } from '../agent/model-discovery';
 import { log } from '../core/logger';
 import { refreshOwnerControls } from '../policy/owner';
 import { SessionStore } from '../session/store';
@@ -215,6 +216,7 @@ class ManagedProfile {
       });
       const availability = await checkRuntimeAgentAvailability(nextAgent);
       if (!availability.ok) throw availability.error;
+      await refreshModelCatalogForProfile(nextRuntime.profileConfig, nextRuntime.appPaths.profileDir);
 
       const appChanged = next.accounts.app.id !== this.cfg.accounts.app.id;
       if (appChanged) {
@@ -335,6 +337,7 @@ export class Supervisor {
     if (this.opts.runPreflight !== false) {
       const availability = await checkRuntimeAgentAvailability(agent);
       if (!availability.ok) throw availability.error;
+      await refreshModelCatalogForProfile(profileConfig, appPaths.profileDir);
     }
 
     const sessions = new SessionStore(appPaths.sessionsFile);

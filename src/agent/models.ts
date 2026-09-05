@@ -11,7 +11,12 @@ export const DEFAULT_REASONING_EFFORT = 'default';
 /** Config-card sentinel meaning the current session follows profile defaults. */
 export const INHERIT_PROFILE_SELECTION = 'inherit-profile';
 
-export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+/**
+ * Codex publishes effort values in its runtime model catalog. Keep this open
+ * ended so a newer CLI can advertise a new level without requiring a bridge
+ * release just to forward the string back to that CLI.
+ */
+export type CodexReasoningEffort = string;
 
 export interface ReasoningEffortOption {
   /** Stored in preferences; the default sentinel omits the Codex override. */
@@ -49,7 +54,7 @@ const DEFAULT_EFFORT_OPTION: ReasoningEffortOption = {
   label: '跟随默认（不指定）',
 };
 
-const CODEX_EFFORT_OPTIONS: Record<CodexReasoningEffort, ReasoningEffortOption> = {
+const CODEX_EFFORT_OPTIONS: Record<string, ReasoningEffortOption> = {
   low: { value: 'low', label: 'Low' },
   medium: { value: 'medium', label: 'Medium' },
   high: { value: 'high', label: 'High' },
@@ -59,22 +64,28 @@ const CODEX_EFFORT_OPTIONS: Record<CodexReasoningEffort, ReasoningEffortOption> 
 };
 
 function effortOptions(...levels: CodexReasoningEffort[]): ReasoningEffortOption[] {
-  return [DEFAULT_EFFORT_OPTION, ...levels.map((level) => CODEX_EFFORT_OPTIONS[level])];
+  return [DEFAULT_EFFORT_OPTION, ...levels.map((level) => reasoningEffortOption(level))];
+}
+
+function reasoningEffortOption(level: string): ReasoningEffortOption {
+  return CODEX_EFFORT_OPTIONS[level] ?? {
+    value: level,
+    label: level.replace(/(^|[-_])([a-z])/g, (_, prefix: string, letter: string) =>
+      `${prefix}${letter.toUpperCase()}`),
+  };
 }
 
 const GPT_5_6_EFFORTS = effortOptions('low', 'medium', 'high', 'xhigh', 'max', 'ultra');
 const GPT_5_6_LUNA_EFFORTS = effortOptions('low', 'medium', 'high', 'xhigh', 'max');
 const LEGACY_CODEX_EFFORTS = effortOptions('low', 'medium', 'high');
 
-/**
- * Claude Code models. Pinned to concrete version ids (Claude Code's `--model`
- * accepts the full model-id string, not just the `opus`/`sonnet` aliases) so
- * the picker names an exact model. Add new ids here when a generation ships;
- * `opusplan` is kept as the one alias with no versioned equivalent (it runs
- * Opus for planning and Sonnet for execution).
- */
-const CLAUDE_MODELS: ModelOption[] = [
+/** Claude Code offline fallback; runtime discovery is merged ahead of it. */
+const CLAUDE_FALLBACK_MODELS: ModelOption[] = [
   { value: DEFAULT_MODEL, label: '跟随默认（不指定）' },
+  { value: 'sonnet', label: 'Sonnet（最新别名）' },
+  { value: 'opus', label: 'Opus（最新别名）' },
+  { value: 'haiku', label: 'Haiku（最新别名）' },
+  { value: 'fable', label: 'Fable（最新别名）' },
   { value: 'claude-opus-4-8', label: 'Opus 4.8（最新）' },
   { value: 'claude-opus-4-7', label: 'Opus 4.7' },
   { value: 'claude-sonnet-5', label: 'Sonnet 5（最新）' },
@@ -84,7 +95,7 @@ const CLAUDE_MODELS: ModelOption[] = [
 ];
 
 /** Codex CLI models. Forwarded to `codex exec --model`. */
-const CODEX_MODELS: ModelOption[] = [
+const CODEX_FALLBACK_MODELS: ModelOption[] = [
   { value: DEFAULT_MODEL, label: '跟随默认（不指定）', reasoningEfforts: GPT_5_6_EFFORTS },
   { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol（旗舰）', reasoningEfforts: GPT_5_6_EFFORTS },
   { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra（均衡）', reasoningEfforts: GPT_5_6_EFFORTS },
@@ -94,9 +105,50 @@ const CODEX_MODELS: ModelOption[] = [
   { value: 'o3', label: 'o3（旧版）', reasoningEfforts: LEGACY_CODEX_EFFORTS },
 ];
 
+const discoveredCatalogs: Record<AgentKind, Map<string, readonly ModelOption[]>> = {
+  claude: new Map(),
+  codex: new Map(),
+};
+
+/**
+ * Install one discovery source's latest snapshot. Sources are kept separate
+ * so multiple profiles with different Codex homes can coexist in one
+ * supervisor process. Passing an empty list intentionally leaves the last
+ * successful snapshot intact; transient CLI failures must not erase a picker.
+ */
+export function registerDiscoveredModels(
+  agentKind: AgentKind,
+  source: string,
+  models: readonly ModelOption[],
+): void {
+  if (models.length === 0) return;
+  discoveredCatalogs[agentKind].set(source, models.map(cloneModelOption));
+}
+
+/** Test helper; production callers should update a named source instead. */
+export function clearDiscoveredModels(): void {
+  discoveredCatalogs.claude.clear();
+  discoveredCatalogs.codex.clear();
+}
+
 /** The model picker options for a profile's agent kind. */
 export function supportedModels(agentKind: AgentKind): ModelOption[] {
-  return agentKind === 'codex' ? CODEX_MODELS : CLAUDE_MODELS;
+  const fallback = agentKind === 'codex' ? CODEX_FALLBACK_MODELS : CLAUDE_FALLBACK_MODELS;
+  const discovered = [...discoveredCatalogs[agentKind].values()].flat();
+  const merged = mergeModelOptions([...discovered, ...fallback].filter((m) => m.value !== DEFAULT_MODEL));
+  const defaultFallback = fallback.find((m) => m.value === DEFAULT_MODEL)!;
+  const defaultOption = agentKind === 'codex'
+    ? {
+        ...defaultFallback,
+        reasoningEfforts: mergeReasoningEfforts([
+          ...(discovered.flatMap((model) => model.reasoningEfforts ?? [])),
+          ...(defaultFallback.reasoningEfforts ?? []),
+        ]),
+      }
+    : defaultFallback;
+  // Feishu static selects accept at most 100 options. Reserve one slot for
+  // the required default sentinel and keep runtime-discovered models first.
+  return [cloneModelOption(defaultOption), ...merged.slice(0, 99)];
 }
 
 /** True when the selection means "use the agent default" (no `--model`). */
@@ -146,7 +198,7 @@ export function supportedReasoningEfforts(
 ): ReasoningEffortOption[] {
   if (agentKind !== 'codex') return [];
   const normalizedModel = normalizeModelSelection(agentKind, model);
-  return CODEX_MODELS.find((item) => item.value === normalizedModel)?.reasoningEfforts
+  return supportedModels(agentKind).find((item) => item.value === normalizedModel)?.reasoningEfforts
     ?? [DEFAULT_EFFORT_OPTION];
 }
 
@@ -160,6 +212,49 @@ export function normalizeReasoningEffortSelection(
   return supportedReasoningEfforts(agentKind, model).some((option) => option.value === value)
     ? (value as CodexReasoningEffort)
     : DEFAULT_REASONING_EFFORT;
+}
+
+function mergeModelOptions(options: readonly ModelOption[]): ModelOption[] {
+  const byValue = new Map<string, ModelOption>();
+  for (const option of options) {
+    const current = byValue.get(option.value);
+    if (!current) {
+      byValue.set(option.value, cloneModelOption(option));
+      continue;
+    }
+    if (option.reasoningEfforts?.length) {
+      current.reasoningEfforts = mergeReasoningEfforts([
+        ...(current.reasoningEfforts ?? []),
+        ...option.reasoningEfforts,
+      ]);
+    }
+  }
+  return [...byValue.values()];
+}
+
+function mergeReasoningEfforts(options: readonly ReasoningEffortOption[]): ReasoningEffortOption[] {
+  const order = ['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+  const byValue = new Map<string, ReasoningEffortOption>();
+  for (const option of options) {
+    if (!byValue.has(option.value)) byValue.set(option.value, { ...option });
+  }
+  return [...byValue.values()].sort((a, b) => {
+    const ai = order.indexOf(a.value);
+    const bi = order.indexOf(b.value);
+    if (ai === -1 && bi === -1) return a.value.localeCompare(b.value);
+    if (ai === -1) return 1;
+    if (bi === -1) return -1;
+    return ai - bi;
+  });
+}
+
+function cloneModelOption(option: ModelOption): ModelOption {
+  return {
+    ...option,
+    ...(option.reasoningEfforts
+      ? { reasoningEfforts: option.reasoningEfforts.map((effort) => ({ ...effort })) }
+      : {}),
+  };
 }
 
 /** Resolve the Codex config override, or undefined for Claude/default. */

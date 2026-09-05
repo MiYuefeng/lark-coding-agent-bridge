@@ -169,7 +169,9 @@ DMs do not require an @ mention. Groups and topic groups require `@bot` by defau
 
 ## Model and reasoning effort
 
-Model and reasoning selections in `/config` are **scoped to the current conversation**. DMs, regular group chats, and topics have separate scopes, so concurrent sessions can run different models. Codex profiles offer `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` alongside legacy options. Reasoning effort supports `low`, `medium`, `high`, `xhigh`, and `max`; Sol and Terra additionally support `ultra`, which enables automatic task delegation, while Luna supports up to `max`.
+Model and reasoning selections in `/config` are **scoped to the current conversation**. DMs, regular group chats, and topics have separate scopes, so concurrent sessions can run different models. The bridge discovers Codex models and model-specific reasoning levels from the installed Codex CLI at runtime, falling back to its bundled catalog when discovery is unavailable. Claude Code rolling aliases and account-cached model options are discovered the same way, so CLI model updates normally require only reopening `/config` (or restarting the bridge), not a new bridge release.
+
+Codex discovery uses the CLI app-server model catalog and falls back to `$CODEX_HOME/models_cache.json`. Claude Code does not expose a documented list-models command, so the bridge discovers rolling aliases from `claude --help` and additional account models from Claude Code's local cache; bundled aliases and pinned models remain as an offline fallback.
 
 **Follow Profile default** inherits the value configured in the web console or profile config. **CLI/account default** explicitly omits that CLI override for only this session. Changes apply to the next run, including a resumed conversation, and do not alter an already-running task. `/new`, `/cd`, and `/ws use` clear these session-level overrides when they reset the conversation. Model and reasoning settings in the web console remain profile defaults.
 

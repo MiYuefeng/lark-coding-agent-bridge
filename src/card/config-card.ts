@@ -211,7 +211,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
                       '\n**当前会话推理强度**\n' +
                       `_Profile 默认：${reasoningEffortLabel(opts.agentKind, effectiveModel, inheritedEffort)}_\n` +
                       '_「跟随 Profile 默认」会继承 Profile；「Codex 默认」会在本会话中明确不覆盖_\n' +
-                      '_Ultra 会启用自动任务委派，仅 GPT-5.6 Sol / Terra 支持；Luna 最高为 Max_',
+                      '_可用强度由本机 Codex 模型目录提供，保存时会按所选模型校验_',
                   },
                   {
                     tag: 'select_static',

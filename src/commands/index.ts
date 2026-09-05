@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
+import { refreshModelCatalogForProfile } from '../agent/model-discovery';
 import {
   INHERIT_PROFILE_SELECTION,
   normalizeModelSelection,
@@ -1728,6 +1729,10 @@ async function handleConfig(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function showConfigForm(ctx: CommandContext): Promise<void> {
+  await refreshModelCatalogForProfile(
+    ctx.controls.profileConfig,
+    commandProfilePaths(ctx).profileDir,
+  );
   await Promise.all([
     ctx.controls.refreshOwner(ctx.channel).catch(() => {}),
     fetchKnownChats(ctx.channel)

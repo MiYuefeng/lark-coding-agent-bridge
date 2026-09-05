@@ -169,7 +169,9 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 ## 模型与推理强度
 
-`/config` 中的模型和推理强度是**当前会话独立配置**：私聊、普通群、话题分别使用自己的 scope，因此可以同时让不同会话运行不同模型。Codex profile 可选 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`，并保留旧模型选项。推理强度可选 `low`、`medium`、`high`、`xhigh`、`max`；Sol 和 Terra 还支持会自动委派任务的 `ultra`，Luna 最高支持 `max`。
+`/config` 中的模型和推理强度是**当前会话独立配置**：私聊、普通群、话题分别使用自己的 scope，因此可以同时让不同会话运行不同模型。Bridge 会在运行时从本机 Codex CLI 发现模型及每个模型的推理强度，发现不可用时回退到内置目录。Claude Code 的滚动别名和账号缓存模型也会动态加入；CLI 更新模型后通常只需重新打开 `/config`（或重启 Bridge），不需要再发布 Bridge 版本。
+
+Codex 优先使用 CLI app-server 的模型目录，失败时读取 `$CODEX_HOME/models_cache.json`。Claude Code 目前没有公开的模型列表命令，Bridge 会从 `claude --help` 发现滚动别名，并读取 Claude Code 本地缓存中的账号模型；离线时仍保留内置别名和固定模型。
 
 选择“跟随 Profile 默认”会继承 Web 控制台或 profile 配置中的默认值；选择“CLI/账号默认”则只在当前会话中明确省略对应 CLI 参数。修改从下一次 run 开始生效，包括恢复中的会话，不会改变正在运行的任务。`/new`、`/cd` 或 `/ws use` 重置会话时也会清除这两个会话级覆盖。Web 控制台中的模型和推理强度仍是 Profile 默认值。
 

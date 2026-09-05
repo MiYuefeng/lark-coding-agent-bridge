@@ -49,7 +49,10 @@ export function createRuntimeAgent(
       larkChannel,
     });
   }
-  return new ClaudeAdapter({ larkChannel });
+  return new ClaudeAdapter({
+    binary: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude',
+    larkChannel,
+  });
 }
 
 export async function checkRuntimeAgentAvailability(agent: AgentAdapter): Promise<AgentAvailability> {
