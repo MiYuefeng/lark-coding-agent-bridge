@@ -65,7 +65,7 @@ import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
 import { lookupMessageThreadId } from './thread-id';
-import { addWorkingReaction, removeReaction } from './reaction';
+import { WorkingReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import {
@@ -77,7 +77,6 @@ import {
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
-const REACTION_CLEANUP_GRACE_MS = 1000;
 
 const BRIDGE_AGENT_INSTRUCTIONS = [
   '你在 bridge 进程中运行，普通 lark-cli 会继承 LARK_CHANNEL=1 并进入 bridge-bound 模式。',
@@ -212,6 +211,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // switch can inject a one-time "model changed" note into the next (resumed)
   // prompt. In-memory only: on restart the first run re-seeds silently.
   const lastRunModelByScope = new Map<string, string>();
+  const workingReactions = new Map<string, WorkingReaction>();
   const cotClient = new CotClient({
     tenant: cfg.accounts.app.tenant,
     appId: cfg.accounts.app.id,
@@ -272,15 +272,19 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
 
-  // Pending → run handoff: while a run is active on a chat, block its pending
-  // queue so messages keep accumulating without flushing. When the run ends,
-  // unblock arms a fresh quiet-window timer. Net effect: at most one run per
-  // chat in flight, and everything sent during a run merges into the next
-  // batch (only flushed once 600ms of silence has passed *after* the run).
-  const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
+  // The normal lane stays blocked for the lifetime of a run. Codex messages
+  // received while that run is active use `steerPending` instead: they retain
+  // the same debounce/media/policy pipeline, then inject into the live turn.
+  // If the turn completes during that race, the batch is moved back to the
+  // normal lane so no user message is lost.
+  const dispatchPendingBatch = (
+    queue: PendingQueue,
+    scope: string,
+    batch: NormalizedMessage[],
+  ): void => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
-    pending.block(scope);
+    queue.block(scope);
     void withTrace({ chatId: firstMsg.chatId }, async () => {
       log.info('flush', 'start', {
         scope,
@@ -317,16 +321,26 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           callbackAuth,
           activePolicyFingerprints,
           lastRunModelByScope,
+          workingReactions,
           scope,
           mode,
+          deferBatch: (deferred) => {
+            for (const message of deferred) pending.push(scope, message);
+          },
         });
       } catch (err) {
         log.fail('flush', err);
       } finally {
-        pending.unblock(scope);
+        queue.unblock(scope);
         log.info('flush', 'end');
       }
     });
+  };
+  const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
+    dispatchPendingBatch(pending, scope, batch);
+  });
+  const steerPending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
+    dispatchPendingBatch(steerPending, scope, batch);
   });
 
   // Counter for stdout reconnect escalation; reset on `reconnected`.
@@ -343,6 +357,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           workspaces,
           activeRuns,
           pending,
+          steerPending,
           msg,
           controls,
           chatModeCache,
@@ -519,6 +534,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       meetingManager?.dispose();
       controls.meeting = undefined;
       pending.cancelAll();
+      steerPending.cancelAll();
       const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
         activeRuns.stopAll(),
@@ -619,6 +635,7 @@ interface IntakeDeps {
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
   pending: PendingQueue;
+  steerPending: PendingQueue;
   msg: NormalizedMessage;
   controls: Controls;
   chatModeCache: ChatModeCache;
@@ -642,6 +659,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     activeRuns,
     pending,
+    steerPending,
     msg,
     controls,
     chatModeCache,
@@ -778,16 +796,24 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     controls,
   });
   if (handled) {
-    const dropped = pending.cancel(scope);
+    const dropped = [...pending.cancel(scope), ...steerPending.cancel(scope)];
     log.info('intake', 'command', { scope, droppedPending: dropped.length });
     return;
   }
 
-  const size = pending.push(scope, emsg);
-  log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+  const active = activeRuns.get(scope);
+  const steerable = agent.id === 'codex' && Boolean(active?.run.steer) && !active?.interrupted;
+  const target = steerable ? steerPending : pending;
+  const size = target.push(scope, emsg);
+  log.info('intake', steerable ? 'queued-steer' : 'queued', {
+    scope,
+    queueSize: size,
+    debounceMs: DEBOUNCE_MS,
+  });
 }
 
 interface RunBatchDeps {
+  workingReactions: Map<string, WorkingReaction>;
   channel: LarkChannel;
   executor: RunExecutor;
   sessions: SessionStore;
@@ -802,6 +828,7 @@ interface RunBatchDeps {
   lastRunModelByScope: Map<string, string>;
   scope: string;
   mode: ChatMode;
+  deferBatch?: (batch: NormalizedMessage[]) => void;
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -977,6 +1004,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     executor,
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    clientUserMessageId: lastMsg.messageId,
     observability: {
       profile: controls.profile,
       agent: capability.agentId,
@@ -985,6 +1013,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     },
   });
   if (!flow.ok) {
+    if (flow.rejectReason.code === 'run-already-active' && deps.deferBatch) {
+      log.info('run-flow', 'deferred-after-steer-race', { scope, batchSize: batch.length });
+      deps.deferBatch(batch);
+      return;
+    }
     log.info('run-flow', 'rejected', { scope, code: flow.rejectReason.code });
     log.warn('policy', 'denied', {
       scope,
@@ -996,6 +1029,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
 
   const { execution, cwdRealpath: cwd } = flow;
+  if (execution.steered) {
+    log.info('run-flow', 'steer-accepted', {
+      scope,
+      runId: execution.runId,
+      batchSize: batch.length,
+    });
+    deps.workingReactions.get(execution.runId)?.moveTo(lastMsg.messageId);
+    return;
+  }
+  const workingReaction = new WorkingReaction(channel);
+  deps.workingReactions.set(execution.runId, workingReaction);
+  workingReaction.moveTo(lastMsg.messageId);
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
   const eventStream = execution.subscribe();
@@ -1069,13 +1114,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           }),
       }
     : {};
-
-  // For non-card modes Claude's output doesn't surface visually until either
-  // a first streamed token (markdown mode) or the whole run ends (text mode).
-  // Add a "Typing" reaction to the triggering message as an instant ack, but
-  // never let that outbound API call block agent event draining.
-  const reactionPromise =
-    cotEnabled || replyMode === 'card' ? undefined : addWorkingReaction(channel, lastMsg.messageId);
 
   try {
     if (cotEnabled) {
@@ -1290,7 +1328,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     log.fail('stream', err);
   } finally {
     activePolicyFingerprints.delete(scope);
-    scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
+    deps.workingReactions.delete(execution.runId);
+    workingReaction.finish();
   }
 }
 
@@ -1764,40 +1803,6 @@ async function runFallbackReply(
   } catch (err) {
     log.fail('stream', err, { mode, step: 'fallback' });
   }
-}
-
-function scheduleWorkingReactionCleanup(
-  channel: LarkChannel,
-  messageId: string,
-  reactionPromise: Promise<string | undefined> | undefined,
-): void {
-  if (!reactionPromise) return;
-
-  void (async () => {
-    const reactionResult = reactionPromise.then(
-      (reactionId) => ({ ok: true as const, reactionId }),
-      (err) => ({ ok: false as const, err }),
-    );
-    const settled = await Promise.race([
-      reactionResult,
-      delay(REACTION_CLEANUP_GRACE_MS).then(() => undefined),
-    ]);
-
-    if (!settled) {
-      log.warn('reaction', 'cleanup-deferred', {
-        messageId,
-        graceMs: REACTION_CLEANUP_GRACE_MS,
-      });
-      void reactionResult.then((result) => {
-        if (!result.ok || !result.reactionId) return;
-        void removeReaction(channel, messageId, result.reactionId);
-      });
-      return;
-    }
-
-    if (!settled.ok || !settled.reactionId) return;
-    await removeReaction(channel, messageId, settled.reactionId);
-  })();
 }
 
 function delay(ms: number): Promise<void> {

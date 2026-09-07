@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CodexAdapter } from '../../src/agent/codex/adapter.js';
-import { buildCodexArgs } from '../../src/agent/codex/argv.js';
+import { buildCodexAppServerArgs } from '../../src/agent/codex/app-server-run.js';
 import type { AgentEvent } from '../../src/agent/types.js';
 
 interface FakeBinary {
@@ -60,16 +60,16 @@ describe('CodexAdapter process contract', () => {
 
     expect(run.runId).toBe('run-fresh');
     expect(await collect(run.events)).toEqual([
-      { type: 'system', threadId: 'thread-fresh' },
+      { type: 'system', threadId: 'thread-fresh', cwd },
       { type: 'final_text', content: 'hello user' },
       { type: 'done', threadId: 'thread-fresh', terminationReason: 'normal' },
     ]);
     const record = await readRecord(fake.recordPath);
 
     expect(await realpath(record.cwd)).toBe(cwd);
-    expect(record.argv).toEqual(buildCodexArgs({ cwd, sandbox: 'read-only' }));
+    expect(record.argv).toEqual(buildCodexAppServerArgs());
     expect(record.argv).not.toContain('--ignore-user-config');
-    expect(record.argv).toContain('--skip-git-repo-check');
+    expect(record.argv).toContain('app-server');
     expect(record.argv).not.toContain('hello from lark');
     expect(record.stdin).toContain('lark-channel-bridge 运行约定');
     expect(record.stdin).toContain('__bridge_cb');
@@ -168,17 +168,15 @@ describe('CodexAdapter process contract', () => {
     });
 
     expect(await collect(run.events)).toEqual([
-      { type: 'done', terminationReason: 'normal' },
+      { type: 'system', threadId: 'thread-old', cwd },
+      { type: 'done', threadId: 'thread-old', terminationReason: 'normal' },
     ]);
     const record = await readRecord(fake.recordPath);
-    expect(record.argv).toEqual(
-      buildCodexArgs({
-        cwd,
-        sandbox: 'workspace-write',
-        threadId: 'thread-old',
-        images: [image],
-      }),
-    );
+    expect(record.argv).toEqual(buildCodexAppServerArgs());
+    expect(record.stdin).toContain('"method":"thread/resume"');
+    expect(record.stdin).toContain('"threadId":"thread-old"');
+    expect(record.stdin).toContain('"type":"localImage"');
+    expect(record.stdin).toContain(image);
   });
 
   it('lets per-run policy sandbox override the adapter default', async () => {
@@ -201,7 +199,8 @@ describe('CodexAdapter process contract', () => {
 
     await collect(run.events);
     const record = await readRecord(fake.recordPath);
-    expect(record.argv).toEqual(buildCodexArgs({ cwd, sandbox: 'read-only' }));
+    expect(record.argv).toEqual(buildCodexAppServerArgs());
+    expect(record.stdin).toContain('"sandbox":"read-only"');
   });
 
   it('honors a profile-configured Codex home', async () => {
@@ -291,7 +290,7 @@ describe('CodexAdapter process contract', () => {
 
     await collect(run.events);
     const record = await readRecord(fake.recordPath);
-    expect(record.argv).toContain('--ignore-user-config');
+    expect(record.argv).toEqual(buildCodexAppServerArgs());
   });
 
   it('includes stderr when the process exits non-zero before a terminal event', async () => {
@@ -309,10 +308,11 @@ describe('CodexAdapter process contract', () => {
     });
 
     expect(await collect(run.events)).toEqual([
+      { type: 'system', threadId: 'thread-fake', cwd: await realpath(fake.dir) },
       { type: 'text', delta: 'before failure' },
       {
         type: 'error',
-        message: 'codex exited with code 42: boom',
+        message: 'codex app-server exited before turn completion (42): boom',
         terminationReason: 'failed',
       },
     ]);
@@ -339,7 +339,7 @@ describe('CodexAdapter process contract', () => {
     });
 
     expect(await collect(run.events)).toEqual([
-      { type: 'system', threadId: 'thread-retry' },
+      { type: 'system', threadId: 'thread-retry', cwd: await realpath(fake.dir) },
       { type: 'final_text', content: 'after retry' },
       { type: 'done', threadId: 'thread-retry', terminationReason: 'normal' },
     ]);
@@ -373,7 +373,7 @@ describe('CodexAdapter process contract', () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.type).toBe('error');
     expect((events[0] as { message?: string }).message).toMatch(
-      /failed to spawn codex|spawn returned no pid|codex exited with code/,
+      /failed to spawn codex|spawn returned no pid|app-server exited/,
     );
   });
 
@@ -397,7 +397,7 @@ describe('CodexAdapter process contract', () => {
 
     expect(await iterator.next()).toEqual({
       done: false,
-      value: { type: 'system', threadId: 'thread-stop' },
+      value: { type: 'system', threadId: 'thread-stop', cwd: await realpath(fake.dir) },
     });
     expect(await run.waitForExit(10)).toBe(false);
     await run.stop();
@@ -406,6 +406,39 @@ describe('CodexAdapter process contract', () => {
       value: { type: 'done', threadId: 'thread-stop', terminationReason: 'interrupted' },
     });
     await iterator.return?.();
+  });
+
+  it('steers a supplemental message into the active Codex turn and completes once', async () => {
+    const fake = await createFakeCodex({
+      lines: [{ type: 'agent_message', message: 'ORIGINAL' }],
+      steerLines: [
+        { type: 'agent_message', message: 'STEERED' },
+        { type: 'turn.completed' },
+      ],
+    });
+    cleanup.push(fake.dir);
+    const cwd = await realpath(fake.dir);
+    const run = new CodexAdapter({ binary: fake.path, profileStateDir: fake.dir }).run({
+      runId: 'run-steer',
+      prompt: 'original prompt',
+      cwd,
+    });
+    const iterator = run.events[Symbol.asyncIterator]();
+
+    expect(await iterator.next()).toEqual({
+      done: false,
+      value: { type: 'system', threadId: 'thread-fake', cwd },
+    });
+    await expect(run.steer?.({ prompt: 'updated prompt' })).resolves.toEqual({ accepted: true });
+    expect(await collectIterator(iterator)).toEqual([
+      { type: 'text', delta: 'ORIGINAL' },
+      { type: 'final_text', content: 'STEERED' },
+      { type: 'done', threadId: 'thread-fake', terminationReason: 'normal' },
+    ]);
+    const record = await readRecord(fake.recordPath);
+    expect(record.stdin).toContain('"method":"turn/steer"');
+    expect(record.stdin).toContain('updated prompt');
+    expect(record.stdin).toContain('"expectedTurnId":"turn-fake"');
   });
 
   it('requires cwd to be resolved by policy before spawning', () => {
@@ -424,8 +457,18 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
   return out;
 }
 
+async function collectIterator(iterator: AsyncIterator<AgentEvent>): Promise<AgentEvent[]> {
+  const out: AgentEvent[] = [];
+  while (true) {
+    const next = await iterator.next();
+    if (next.done) return out;
+    out.push(next.value);
+  }
+}
+
 async function createFakeCodex(options: {
   lines: unknown[];
+  steerLines?: unknown[];
   stderr?: string;
   exitCode?: number;
   exitDelayMs?: number;
@@ -438,29 +481,85 @@ async function createFakeCodex(options: {
     [
       '#!/usr/bin/env node',
       'import { writeFileSync } from "node:fs";',
+      `const configuredLines = ${JSON.stringify(options.lines)};`,
+      `const steerLines = ${JSON.stringify(options.steerLines ?? [])};`,
+      `const recordPath = ${JSON.stringify(recordPath)};`,
       'let stdin = "";',
-      'process.stdin.setEncoding("utf8");',
-      'process.stdin.on("data", (chunk) => { stdin += chunk; });',
-      'process.stdin.on("end", () => {',
-      `  writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({`,
-      '    argv: process.argv.slice(2),',
-      '    cwd: process.cwd(),',
-      '    stdin,',
-      '    env: {',
-      '      LARK_CHANNEL: process.env.LARK_CHANNEL,',
-      '      LARK_CHANNEL_PROFILE: process.env.LARK_CHANNEL_PROFILE,',
-      '      LARK_CHANNEL_HOME: process.env.LARK_CHANNEL_HOME,',
-      '      LARK_CHANNEL_CONFIG: process.env.LARK_CHANNEL_CONFIG,',
-      '      LARKSUITE_CLI_CONFIG_DIR: process.env.LARKSUITE_CLI_CONFIG_DIR,',
-      '      CODEX_HOME: process.env.CODEX_HOME,',
-      '      APP_SECRET: process.env.APP_SECRET,',
-      '      PATH: process.env.PATH,',
-      '    },',
-      '  }));',
-      `  const lines = ${JSON.stringify(options.lines)};`,
-      '  for (const line of lines) console.log(JSON.stringify(line));',
-      options.stderr ? `  process.stderr.write(${JSON.stringify(options.stderr)});` : '',
+      'let rpcBuffer = "";',
+      'let threadId = configuredLines.find((line) => line.type === "thread.started")?.thread_id ?? "thread-fake";',
+      'const turnId = "turn-fake";',
+      'let exitScheduled = false;',
+      'const persist = () => writeFileSync(recordPath, JSON.stringify({',
+      '  argv: process.argv.slice(2),',
+      '  cwd: process.cwd(),',
+      '  stdin,',
+      '  env: {',
+      '    LARK_CHANNEL: process.env.LARK_CHANNEL,',
+      '    LARK_CHANNEL_PROFILE: process.env.LARK_CHANNEL_PROFILE,',
+      '    LARK_CHANNEL_HOME: process.env.LARK_CHANNEL_HOME,',
+      '    LARK_CHANNEL_CONFIG: process.env.LARK_CHANNEL_CONFIG,',
+      '    LARKSUITE_CLI_CONFIG_DIR: process.env.LARKSUITE_CLI_CONFIG_DIR,',
+      '    CODEX_HOME: process.env.CODEX_HOME,',
+      '    APP_SECRET: process.env.APP_SECRET,',
+      '    PATH: process.env.PATH,',
+      '  },',
+      '}));',
+      'const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");',
+      'const scheduleExit = () => {',
+      '  if (exitScheduled) return;',
+      '  exitScheduled = true;',
       `  setTimeout(() => process.exit(${options.exitCode ?? 0}), ${options.exitDelayMs ?? 0});`,
+      '};',
+      'const emitConfiguredLines = (lines) => {',
+      '  let terminal = false;',
+      '  for (const line of lines) {',
+      '    if (line.type === "thread.started" || line.type === "turn.started") continue;',
+      '    if (line.type === "agent_message") {',
+      '      send({ method: "item/completed", params: { threadId, turnId, item: { id: "message-fake", type: "agentMessage", text: line.message ?? line.text ?? "" } } });',
+      '    } else if (line.type === "error") {',
+      '      send({ method: "error", params: { error: line.error ?? { message: line.message ?? "codex error" } } });',
+      '    } else if (line.type === "turn.failed") {',
+      '      terminal = true;',
+      '      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "failed", items: [], error: line.error ?? { message: "codex turn failed" } } } });',
+      '    } else if (line.type === "turn.completed") {',
+      '      terminal = true;',
+      '      if (line.usage) send({ method: "thread/tokenUsage/updated", params: { threadId, turnId, tokenUsage: { last: line.usage, total: line.usage } } });',
+      '      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed", items: [] } } });',
+      '    }',
+      '  }',
+      `  if (!terminal && ${options.exitCode !== undefined ? 'true' : 'false'}) scheduleExit();`,
+      `  if (${Boolean(options.stderr)}) process.stderr.write(${JSON.stringify(options.stderr ?? '')});`,
+      '};',
+      'const handle = (request) => {',
+      '  if (request.method === "initialize") {',
+      '    send({ id: request.id, result: {} });',
+      '  } else if (request.method === "thread/start" || request.method === "thread/resume") {',
+      '    threadId = request.params?.threadId ?? threadId;',
+      '    send({ id: request.id, result: { thread: { id: threadId }, cwd: request.params?.cwd } });',
+      '  } else if (request.method === "turn/start") {',
+      '    send({ id: request.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });',
+      '    send({ method: "turn/started", params: { threadId, turn: { id: turnId, status: "inProgress", items: [] } } });',
+      '    emitConfiguredLines(configuredLines);',
+      '  } else if (request.method === "turn/steer") {',
+      '    send({ id: request.id, result: { turnId } });',
+      '    emitConfiguredLines(steerLines);',
+      '  }',
+      '};',
+      'process.stdin.setEncoding("utf8");',
+      'process.stdin.on("data", (chunk) => {',
+      '  stdin += chunk;',
+      '  rpcBuffer += chunk;',
+      '  let newline;',
+      '  while ((newline = rpcBuffer.indexOf("\\n")) !== -1) {',
+      '    const line = rpcBuffer.slice(0, newline).trim();',
+      '    rpcBuffer = rpcBuffer.slice(newline + 1);',
+      '    if (line) handle(JSON.parse(line));',
+      '  }',
+      '  persist();',
+      '});',
+      'process.stdin.on("end", () => {',
+      '  persist();',
+      '  scheduleExit();',
       '});',
     ].filter(Boolean).join('\n'),
     'utf8',

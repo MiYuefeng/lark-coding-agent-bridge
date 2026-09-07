@@ -12,7 +12,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 - **Streaming card**: text replies and tool calls update on one Lark card in real time.
 - **COT process messages**: optionally send a process message with agent progress text and tool calls, then send the final answer separately.
 - **Session continuity**: each chat, topic, or document comment thread keeps its own session.
-- **Queueing and batching**: messages sent in quick succession are handled together; messages sent during a run are queued for the next turn, while commands like `/new`, `/cd`, `/ws use`, and `/stop` can interrupt the current task.
+- **Live steering and batching**: messages sent in quick succession are handled together; new messages received during an active Codex run are injected into that turn and completed with the existing task (completion races safely fall back to the next turn). Agents without steering still queue messages for the next turn, while commands like `/new`, `/cd`, `/ws use`, and `/stop` can interrupt the current task.
 - **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
 - **Images and files**: send them to the bot directly, and the bridge downloads them locally for the agent.
 - **Interactive cards**: `/help`, `/ws list`, and `/status` return cards with clickable buttons.
@@ -22,7 +22,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 - Node.js **>= 20.12.0**
 - At least one local agent installed and logged in:
   - Claude Code: `claude`, see https://docs.anthropic.com/en/docs/claude-code/quickstart
-  - Codex CLI: `codex`, see https://developers.openai.com/codex/cli
+  - Codex CLI: `codex` (Codex mode requires a recent build with app-server `turn/steer` support), see https://developers.openai.com/codex/cli
 - A Feishu / Lark **PersonalAgent** app. The first-run QR wizard can create and bind one for you.
 
 ## Install
@@ -36,7 +36,7 @@ pnpm add -g lark-channel-bridge
 To install the MiYuefeng session-model release directly from GitHub:
 
 ```bash
-npm install -g https://github.com/MiYuefeng/lark-coding-agent-bridge/releases/download/v0.7.2-session-model.0/lark-channel-bridge-0.7.2-session-model.0.tgz
+npm install -g https://github.com/MiYuefeng/lark-coding-agent-bridge/releases/download/v0.7.2-session-model.1/lark-channel-bridge-0.7.2-session-model.1.tgz
 ```
 
 ## First run
@@ -176,6 +176,8 @@ Codex discovery uses the CLI app-server model catalog and falls back to `$CODEX_
 **Follow Profile default** inherits the value configured in the web console or profile config. **CLI/account default** explicitly omits that CLI override for only this session. Changes apply to the next run, including a resumed conversation, and do not alter an already-running task. `/new`, `/cd`, and `/ws use` clear these session-level overrides when they reset the conversation. Model and reasoning settings in the web console remain profile defaults.
 
 ## Reply Display and COT
+
+A typing reaction stays on the message while work is in progress and is removed after the final reply is sent. When Codex accepts a supplemental message during a run, the reaction moves to that message. This applies to text, card, and COT modes.
 
 `/config` also controls three presentation settings:
 

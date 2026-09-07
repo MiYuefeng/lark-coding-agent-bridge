@@ -26,6 +26,9 @@ export interface SubmitRunInput {
   images?: readonly string[];
   stopGraceMs?: number;
   nowait?: boolean;
+  /** Attempt same-turn steering when this scope already has a compatible run. */
+  allowSteer?: boolean;
+  clientUserMessageId?: string;
   observability?: {
     profile: string;
     agent: string;
@@ -39,6 +42,8 @@ export interface RunExecution {
   scopeId: string;
   run: AgentRun;
   handle: RunHandle;
+  /** True when this submission was injected into an existing active run. */
+  steered: boolean;
   subscribe(): AsyncIterable<AgentEvent>;
   stop(): Promise<void>;
 }
@@ -52,6 +57,7 @@ export class RunExecutor {
   private readonly createRunId: () => string;
   private readonly now: () => number;
   private readonly postDoneExitGraceMs: number;
+  private readonly compatibility = new WeakMap<AgentRun, RunCompatibility>();
 
   constructor(deps: RunExecutorDeps) {
     this.agent = deps.agent;
@@ -72,6 +78,47 @@ export class RunExecutor {
         'reconnect-in-progress',
         this.activeRuns.newRunsPauseReason() ?? 'new runs are temporarily paused',
       );
+    }
+    const active = this.activeRuns.get(input.scopeId);
+    if (
+      input.allowSteer === true &&
+      active &&
+      !active.interrupted &&
+      active.run.steer &&
+      isSteerCompatible(this.compatibility.get(active.run), input)
+    ) {
+      const steerStartedAt = this.now();
+      const steer = await active.run.steer({
+        prompt: input.policy.prompt,
+        images: input.images,
+        ...(input.clientUserMessageId
+          ? { clientUserMessageId: input.clientUserMessageId }
+          : {}),
+      });
+      if (steer.accepted) {
+        log.info('run', 'steered', {
+          runId: active.run.runId,
+          scope: input.scopeId,
+          source: input.observability?.source ?? 'unknown',
+          promptChars: input.policy.prompt.length,
+          images: input.images?.length ?? 0,
+          durationMs: this.now() - steerStartedAt,
+        });
+        return {
+          runId: active.run.runId,
+          scopeId: input.scopeId,
+          run: active.run,
+          handle: active,
+          steered: true,
+          subscribe: emptyEventStream,
+          stop: () => active.run.stop(),
+        };
+      }
+      log.info('run', 'steer-fallback', {
+        runId: active.run.runId,
+        scope: input.scopeId,
+        reason: steer.reason ?? 'not-accepted',
+      });
     }
     const releaseScope = this.activeRuns.reserve(input.scopeId);
     if (!releaseScope) {
@@ -151,6 +198,12 @@ export class RunExecutor {
     let handle: RunHandle;
     try {
       handle = this.activeRuns.register(input.scopeId, run);
+      this.compatibility.set(run, {
+        cwdRealpath: input.policy.cwdRealpath,
+        policyFingerprint: input.policy.policyFingerprint,
+        model: input.model,
+        reasoningEffort: input.reasoningEffort,
+      });
     } catch (err) {
       releaseScope();
       release();
@@ -195,6 +248,7 @@ export class RunExecutor {
       scopeId: input.scopeId,
       run,
       handle,
+      steered: false,
       subscribe: () => fanout.subscribe(),
       stop: async () => {
         handle.interrupted = true;
@@ -204,6 +258,34 @@ export class RunExecutor {
       },
     };
   }
+}
+
+interface RunCompatibility {
+  cwdRealpath: string;
+  policyFingerprint: string;
+  model?: string;
+  reasoningEffort?: CodexReasoningEffort;
+}
+
+function isSteerCompatible(
+  active: RunCompatibility | undefined,
+  input: SubmitRunInput,
+): boolean {
+  return Boolean(
+    active &&
+    active.cwdRealpath === input.policy.cwdRealpath &&
+    active.policyFingerprint === input.policy.policyFingerprint &&
+    active.model === input.model &&
+    active.reasoningEffort === input.reasoningEffort,
+  );
+}
+
+function emptyEventStream(): AsyncIterable<AgentEvent> {
+  return {
+    async *[Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
+      return;
+    },
+  };
 }
 
 function observeRunEvents(

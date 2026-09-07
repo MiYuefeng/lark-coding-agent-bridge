@@ -12,7 +12,7 @@
 - **流式卡片**：文本回复和工具调用实时更新在同一张卡片上。
 - **COT 过程消息**：可选先发一条过程消息展示 agent 的阶段性文本和工具调用，再单独发送最终答案。
 - **会话延续**：每个聊天、话题或文档评论有自己的会话，不会互相串。
-- **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，`/new`、`/cd`、`/ws use`、`/stop` 这类命令可以中断当前任务。
+- **实时 steer 与消息合并**：短时间连续发送的消息会合并处理；Codex 任务运行中收到的新消息会实时注入当前 turn，并与已有任务合并完成（完成边界自动回退到下一轮，不丢消息）。不支持 steer 的 agent 仍排队到下一轮；`/new`、`/cd`、`/ws use`、`/stop` 这类命令可以中断当前任务。
 - **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
 - **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
 - **卡片按钮**：`/help`、`/ws list`、`/status` 返回可点击的交互卡片。
@@ -22,7 +22,7 @@
 - Node.js **>= 20.12.0**
 - 本机至少安装并登录一个 agent：
   - Claude Code：`claude`，安装说明：https://docs.anthropic.com/en/docs/claude-code/quickstart
-  - Codex CLI：`codex`，安装说明：https://developers.openai.com/codex/cli
+  - Codex CLI：`codex`（Codex 模式需要支持 app-server `turn/steer` 的近期版本），安装说明：https://developers.openai.com/codex/cli
 - 一个飞书 / Lark PersonalAgent 应用。首次启动的扫码向导可以帮你创建并绑定。
 
 ## 安装
@@ -36,7 +36,7 @@ pnpm add -g lark-channel-bridge
 直接从 GitHub 安装 MiYuefeng 的会话模型版本：
 
 ```bash
-npm install -g https://github.com/MiYuefeng/lark-coding-agent-bridge/releases/download/v0.7.2-session-model.0/lark-channel-bridge-0.7.2-session-model.0.tgz
+npm install -g https://github.com/MiYuefeng/lark-coding-agent-bridge/releases/download/v0.7.2-session-model.1/lark-channel-bridge-0.7.2-session-model.1.tgz
 ```
 
 ## 首次启动
@@ -176,6 +176,8 @@ Codex 优先使用 CLI app-server 的模型目录，失败时读取 `$CODEX_HOME
 选择“跟随 Profile 默认”会继承 Web 控制台或 profile 配置中的默认值；选择“CLI/账号默认”则只在当前会话中明确省略对应 CLI 参数。修改从下一次 run 开始生效，包括恢复中的会话，不会改变正在运行的任务。`/new`、`/cd` 或 `/ws use` 重置会话时也会清除这两个会话级覆盖。Web 控制台中的模型和推理强度仍是 Profile 默认值。
 
 ## 回复展示与 COT
+
+工作中的消息会持续显示敲键盘表情，最终回复发送完成后移除。Codex 在执行中接收补充消息后，会将工作表情转移到最新接收的消息上；文本、卡片和 COT 模式均支持。
 
 `/config` 还可以调整三类展示选项：
 

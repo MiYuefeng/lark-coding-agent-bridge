@@ -50,9 +50,30 @@ export interface AgentRunOptions {
   stopGraceMs?: number;
 }
 
+export interface AgentSteerInput {
+  /** Additional user instructions to inject into the currently active turn. */
+  prompt: string;
+  /** Local images attached to the additional user message. */
+  images?: readonly string[];
+  /** Optional stable id for protocol-level user-message deduplication. */
+  clientUserMessageId?: string;
+}
+
+export interface AgentSteerResult {
+  accepted: boolean;
+  /** Adapter-specific diagnostic; never shown to the user verbatim. */
+  reason?: string;
+}
+
 export interface AgentRun {
   readonly runId: string;
   readonly events: AsyncIterable<AgentEvent>;
+  /**
+   * Inject another user message into this active turn. Adapters that do not
+   * support same-turn steering omit this method. A false result means the
+   * caller must retain the message and start a normal follow-up turn instead.
+   */
+  steer?(input: AgentSteerInput): Promise<AgentSteerResult>;
   stop(): Promise<void>;
   /**
    * Wait up to `timeoutMs` for the agent process to exit on its own.

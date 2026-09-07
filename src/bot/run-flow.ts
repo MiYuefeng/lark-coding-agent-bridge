@@ -35,6 +35,7 @@ export interface StartRunFlowInput {
   executor: RunExecutor;
   now: number;
   stopGraceMs?: number;
+  clientUserMessageId?: string;
   observability?: {
     profile: string;
     agent: string;
@@ -159,6 +160,8 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
               .filter((path): path is string => Boolean(path))
           : undefined,
       stopGraceMs: input.stopGraceMs,
+      allowSteer: input.scope.source === 'im' && input.capability.agentId === 'codex',
+      clientUserMessageId: input.clientUserMessageId,
       observability: input.observability,
     });
   } catch (err) {

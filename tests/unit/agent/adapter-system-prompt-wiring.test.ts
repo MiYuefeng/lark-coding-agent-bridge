@@ -29,6 +29,8 @@ interface FakeChild extends EventEmitter {
   kill: ReturnType<typeof vi.fn>;
 }
 
+const codexStdin = new WeakMap<FakeChild, string>();
+
 function fakeChild(): FakeChild {
   const child = new EventEmitter() as FakeChild;
   child.pid = 4242;
@@ -38,6 +40,44 @@ function fakeChild(): FakeChild {
   child.exitCode = 0;
   child.signalCode = null;
   child.kill = vi.fn();
+  return child;
+}
+
+function fakeCodexChild(): FakeChild {
+  const child = fakeChild();
+  child.exitCode = null;
+  let buffer = '';
+  const send = (message: unknown): void => {
+    child.stdout.write(`${JSON.stringify(message)}\n`);
+  };
+  child.stdin.setEncoding('utf8');
+  child.stdin.on('data', (chunk: string) => {
+    codexStdin.set(child, `${codexStdin.get(child) ?? ''}${chunk}`);
+    buffer += chunk;
+    let newline = buffer.indexOf('\n');
+    while (newline !== -1) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      newline = buffer.indexOf('\n');
+      if (!line) continue;
+      const request = JSON.parse(line) as { id?: number; method?: string; params?: Record<string, unknown> };
+      if (request.method === 'initialize') send({ id: request.id, result: {} });
+      if (request.method === 'thread/start') {
+        send({ id: request.id, result: { thread: { id: 'thread-1' }, cwd: '/tmp' } });
+      }
+      if (request.method === 'turn/start') {
+        send({ id: request.id, result: { turn: { id: 'turn-1', status: 'inProgress', items: [] } } });
+        send({
+          method: 'turn/completed',
+          params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } },
+        });
+      }
+    }
+  });
+  child.stdin.on('end', () => {
+    child.exitCode = 0;
+    child.emit('exit', 0, null);
+  });
   return child;
 }
 
@@ -90,30 +130,47 @@ describe('CodexAdapter system prompt wiring', () => {
   }
 
   it('prefixes stdin with the identity-aware bridge system prompt after setBotIdentity', async () => {
-    const child = fakeChild();
+    const child = fakeCodexChild();
     spawnMock.spawnProcess.mockReturnValue(child);
     const adapter = codexAdapter();
     adapter.setBotIdentity({ openId: 'ou_bot_self', name: 'Bridge' });
 
     adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp' });
 
-    const stdin = await readAll(child.stdin);
-    expect(stdin).toBe(
+    const prompt = turnStartPrompt(await readCodexStdin(child));
+    expect(prompt).toBe(
       prefixBridgeSystemPrompt('hi', { openId: 'ou_bot_self', name: 'Bridge' }),
     );
   });
 
   it('falls back to the base system prompt when no identity was set', async () => {
-    const child = fakeChild();
+    const child = fakeCodexChild();
     spawnMock.spawnProcess.mockReturnValue(child);
     const adapter = codexAdapter();
 
     adapter.run({ runId: 'r1', prompt: 'hi', cwd: '/tmp' });
 
-    const stdin = await readAll(child.stdin);
-    expect(stdin).toBe(prefixBridgeSystemPrompt('hi', undefined));
+    const prompt = turnStartPrompt(await readCodexStdin(child));
+    expect(prompt).toBe(prefixBridgeSystemPrompt('hi', undefined));
   });
 });
+
+function turnStartPrompt(stdin: string): string | undefined {
+  const requests = stdin.trim().split('\n').map((line) => JSON.parse(line) as {
+    method?: string;
+    params?: { input?: Array<{ type?: string; text?: string }> };
+  });
+  return requests
+    .find((request) => request.method === 'turn/start')
+    ?.params?.input?.find((input) => input.type === 'text')?.text;
+}
+
+async function readCodexStdin(child: FakeChild): Promise<string> {
+  if (!child.stdin.writableFinished) {
+    await new Promise<void>((resolve) => child.stdin.once('finish', resolve));
+  }
+  return codexStdin.get(child) ?? '';
+}
 
 async function readAll(stream: PassThrough): Promise<string> {
   const chunks: Buffer[] = [];

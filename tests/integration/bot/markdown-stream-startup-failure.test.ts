@@ -2,7 +2,12 @@ import type { NormalizedMessage } from '@larksuite/channel';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AgentEvent } from '../../../src/agent/types.js';
+import type {
+  AgentEvent,
+  AgentRun,
+  AgentRunOptions,
+  AgentSteerInput,
+} from '../../../src/agent/types.js';
 import type { FakeAgentEvents } from '../../helpers/fake-agent.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { log } from '../../../src/core/logger.js';
@@ -82,6 +87,86 @@ afterEach(async () => {
 });
 
 describe('markdown stream startup failures', () => {
+  it('steers a new IM message into the active Codex run and sends one combined reply', async () => {
+    const agent = new SteerableFakeAgent();
+    const h = await createHarness({ agent, messageReply: 'text' });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'start the long task'));
+    await waitFor(() => agent.runOptions.length === 1);
+
+    await h.channel.handlers.message?.(message('om_second', 'include this update too'));
+    await waitFor(() => agent.activeRun.steers.length === 1);
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(agent.runOptions).toHaveLength(1);
+    expect(agent.activeRun.steers[0]?.prompt).toContain('include this update too');
+    expect(lastMarkdown(h.channel)).toContain('FINAL_AFTER_STEER');
+    expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_first' });
+  });
+
+  it.each(['text', 'markdown', 'card'] as const)(
+    'keeps the working reaction on the latest accepted message until final delivery in %s mode',
+    async (messageReply) => {
+      const agent = new SteerableFakeAgent(true);
+      const delivery = deferred<{ messageId: string }>();
+      const h = await createHarness({
+        agent,
+        messageReply,
+        send: () => delivery.promise,
+        stream: async (_chatId, input) => {
+          const producer = input as {
+            markdown?: (ctrl: { setContent: () => Promise<void> }) => Promise<void>;
+            card?: { producer?: (ctrl: { update: () => Promise<void> }) => Promise<void> };
+          };
+          await producer.markdown?.({ setContent: async () => {} });
+          await producer.card?.producer?.({ update: async () => {} });
+        },
+      });
+      await startTestBridge(h);
+      const reactions = h.channel.rawClient.im.v1.messageReaction;
+      await h.channel.handlers.message?.(message('om_first', 'start'));
+      await waitFor(() => reactions.create.mock.calls.length === 1);
+      expect(reactions.delete).not.toHaveBeenCalled();
+
+      await h.channel.handlers.message?.(message('om_second', 'update'));
+      await waitFor(() => reactions.delete.mock.calls.length === 1);
+      expect(reactions.delete.mock.calls[0]?.[0]).toMatchObject({ path: { message_id: 'om_first' } });
+      // The old two-second acknowledgement would disappear while still working.
+      await new Promise((resolve) => setTimeout(resolve, 2100));
+      expect(reactions.delete).toHaveBeenCalledTimes(1);
+
+      await h.channel.handlers.message?.(message('om_third', 'another update'));
+      await waitFor(() => reactions.delete.mock.calls.length === 2);
+      expect(reactions.delete.mock.calls[1]?.[0]).toMatchObject({ path: { message_id: 'om_second' } });
+      await agent.activeRun.stop();
+      await waitFor(() => h.channel.sent.length === 1);
+      expect(reactions.delete).toHaveBeenCalledTimes(2);
+      delivery.resolve({ messageId: 'final_delivery' });
+      await waitFor(() => reactions.delete.mock.calls.length === 3);
+      expect(reactions.delete.mock.calls[2]?.[0]).toMatchObject({ path: { message_id: 'om_third' } });
+    },
+    10_000,
+  );
+
+  it('falls back to a follow-up run when steer loses the completion race', async () => {
+    const agent = new RejectingSteerFakeAgent();
+    const h = await createHarness({ agent, messageReply: 'text' });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'start'));
+    await waitFor(() => agent.runOptions.length === 1);
+    await h.channel.handlers.message?.(message('om_second', 'must survive the race'));
+
+    await waitFor(() => agent.runOptions.length === 2);
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(agent.firstRun.steers).toHaveLength(1);
+    expect(agent.runOptions[1]?.prompt).toContain('must survive the race');
+    expect(lastMarkdown(h.channel)).toContain('FALLBACK_AFTER_RACE');
+    expect(h.channel.sent[0]?.options).toMatchObject({ replyTo: 'om_second' });
+  });
+
   it('does not leave the IM queue blocked when the agent exits before stream producer starts', async () => {
     const h = await createHarness();
     await startTestBridge(h);
@@ -438,6 +523,7 @@ async function createHarness(options: {
   messageReply?: 'card' | 'markdown' | 'text';
   /** Codex holds its answer back for a dedicated final reply; Claude streams it. */
   agentKind?: 'claude' | 'codex';
+  agent?: FakeAgentAdapter;
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel;
@@ -464,7 +550,9 @@ async function createHarness(options: {
     codex: {
       binaryPath: '/usr/local/bin/codex',
     },
-    ...(options.messageReply ? { preferences: { messageReply: options.messageReply } } : {}),
+    ...(options.messageReply
+      ? { preferences: { messageReply: options.messageReply, messageReplyMigrated: true } }
+      : {}),
   });
   const profileConfig = {
     ...baseProfileConfig,
@@ -475,7 +563,7 @@ async function createHarness(options: {
   };
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
-  const agent = new FakeAgentAdapter({
+  const agent = options.agent ?? new FakeAgentAdapter({
     id: 'codex',
     displayName: 'Codex',
     events: options.events ?? [
@@ -505,6 +593,126 @@ async function createHarness(options: {
     profileConfig,
     controls,
   };
+}
+
+class SteerableFakeAgent extends FakeAgentAdapter {
+  readonly activeRun: SteerableFakeRun;
+
+  constructor(holdAfterSteer = false) {
+    super({ id: 'codex', displayName: 'Codex' });
+    this.activeRun = new SteerableFakeRun(holdAfterSteer);
+  }
+
+  override run(opts: AgentRunOptions): AgentRun {
+    this.runOptions.push(opts);
+    this.activeRun.setRunId(opts.runId);
+    return this.activeRun;
+  }
+}
+
+class SteerableFakeRun implements AgentRun {
+  runId = '';
+  readonly steers: AgentSteerInput[] = [];
+  readonly events: AsyncIterable<AgentEvent>;
+  private release!: () => void;
+  private readonly steered: Promise<void>;
+
+  constructor(private readonly holdAfterSteer = false) {
+    this.steered = new Promise((resolve) => {
+      this.release = resolve;
+    });
+    const self = this;
+    this.events = {
+      async *[Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
+        yield { type: 'system', threadId: 'thread-steer' };
+        yield { type: 'text', delta: 'working' };
+        await self.steered;
+        yield { type: 'final_text', content: 'FINAL_AFTER_STEER' };
+        yield { type: 'done', threadId: 'thread-steer', terminationReason: 'normal' };
+      },
+    };
+  }
+
+  setRunId(runId: string): void {
+    this.runId = runId;
+  }
+
+  async steer(input: AgentSteerInput): Promise<{ accepted: boolean }> {
+    this.steers.push(input);
+    if (!this.holdAfterSteer) this.release();
+    return { accepted: true };
+  }
+
+  async stop(): Promise<void> {
+    this.release();
+  }
+
+  async waitForExit(): Promise<boolean> {
+    return true;
+  }
+}
+
+class RejectingSteerFakeAgent extends FakeAgentAdapter {
+  readonly firstRun = new RejectingSteerFakeRun();
+  private started = false;
+
+  constructor() {
+    super({
+      id: 'codex',
+      displayName: 'Codex',
+      events: [
+        { type: 'final_text', content: 'FALLBACK_AFTER_RACE' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    });
+  }
+
+  override run(opts: AgentRunOptions): AgentRun {
+    if (!this.started) {
+      this.started = true;
+      this.runOptions.push(opts);
+      this.firstRun.setRunId(opts.runId);
+      return this.firstRun;
+    }
+    return super.run(opts);
+  }
+}
+
+class RejectingSteerFakeRun implements AgentRun {
+  runId = '';
+  readonly steers: AgentSteerInput[] = [];
+  readonly events: AsyncIterable<AgentEvent>;
+  private release!: () => void;
+
+  constructor() {
+    const completed = new Promise<void>((resolve) => {
+      this.release = resolve;
+    });
+    this.events = {
+      async *[Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
+        await completed;
+        yield { type: 'done', threadId: 'thread-race', terminationReason: 'normal' };
+      },
+    };
+  }
+
+  setRunId(runId: string): void {
+    this.runId = runId;
+  }
+
+  async steer(input: AgentSteerInput): Promise<{ accepted: boolean; reason: string }> {
+    this.steers.push(input);
+    this.release();
+    return { accepted: false, reason: 'turn already completed' };
+  }
+
+  async stop(): Promise<void> {
+    this.release();
+  }
+
+  async waitForExit(): Promise<boolean> {
+    return true;
+  }
 }
 
 async function startTestBridge(h: {

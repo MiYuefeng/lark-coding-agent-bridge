@@ -1,17 +1,7 @@
 import type { LarkChannel } from '@larksuite/channel';
 import { log } from '../core/logger';
 
-/**
- * Add a "Typing" reaction (敲键盘) to a message to give text-mode users an
- * instant "I got your message and I'm responding" cue while Claude is still
- * thinking. Matches the conventional Feishu UX for "the other side is
- * replying". Card mode doesn't need this — the streaming card already
- * shows a "正在思考…" footer the moment it's posted.
- *
- * Returns the reaction id on success, undefined on any failure. Failures
- * are logged but never thrown — losing a decoration must not break the
- * actual reply flow.
- */
+/** Add the working indicator. API failures must never block the reply flow. */
 export async function addWorkingReaction(
   channel: LarkChannel,
   messageId: string,
@@ -45,5 +35,40 @@ export async function removeReaction(
       reactionId,
       err: err instanceof Error ? err.message : String(err),
     });
+  }
+}
+
+/** One run owns one indicator, including messages accepted through steering.
+ * Adds and removals never block agent output or final delivery. */
+export class WorkingReaction {
+  private finished = false;
+  private target?: string;
+  private generation = 0;
+  private visible?: { messageId: string; reactionId: string };
+
+  constructor(private readonly channel: LarkChannel) {}
+
+  moveTo(messageId: string): void {
+    if (this.finished || this.target === messageId) return;
+    this.target = messageId;
+    const generation = ++this.generation;
+    void addWorkingReaction(this.channel, messageId).then((reactionId) => {
+      if (!reactionId) return;
+      if (this.finished || generation !== this.generation) {
+        void removeReaction(this.channel, messageId, reactionId);
+        return;
+      }
+      const previous = this.visible;
+      this.visible = { messageId, reactionId };
+      // Keep the old indicator until its replacement has actually appeared.
+      if (previous) void removeReaction(this.channel, previous.messageId, previous.reactionId);
+    });
+  }
+
+  finish(): void {
+    this.finished = true;
+    const previous = this.visible;
+    this.visible = undefined;
+    if (previous) void removeReaction(this.channel, previous.messageId, previous.reactionId);
   }
 }

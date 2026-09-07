@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import type { AgentAdapter, AgentRun, AgentRunOptions } from '../../../src/agent/types';
+import type {
+  AgentAdapter,
+  AgentEvent,
+  AgentRun,
+  AgentRunOptions,
+  AgentSteerInput,
+} from '../../../src/agent/types';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { ProcessPool } from '../../../src/bot/process-pool';
 import { RunExecutor } from '../../../src/runtime/run-executor';
@@ -144,6 +150,59 @@ describe('RunExecutor', () => {
     ).rejects.toMatchObject({ code: 'run-already-active' });
     expect(h.agent.runs).toHaveLength(1);
 
+    await collect(first.subscribe());
+  });
+
+  it('injects a compatible Codex submission into the active run', async () => {
+    const agent = new SteerableAgent();
+    const h = await createHarness({ agent });
+    const first = await h.executor.submit({
+      scopeId: 'scope-1',
+      policy: policy(h.tmp.workspace),
+      model: 'gpt-6-astra',
+      reasoningEffort: 'high',
+    });
+
+    const supplement = await h.executor.submit({
+      scopeId: 'scope-1',
+      policy: policy(h.tmp.workspace, { prompt: 'updated instruction' }),
+      model: 'gpt-6-astra',
+      reasoningEffort: 'high',
+      allowSteer: true,
+      clientUserMessageId: 'om_update',
+    });
+
+    expect(supplement.steered).toBe(true);
+    expect(supplement.runId).toBe(first.runId);
+    expect(agent.runs).toHaveLength(1);
+    expect(agent.runs[0]?.steers).toEqual([
+      { prompt: 'updated instruction', images: undefined, clientUserMessageId: 'om_update' },
+    ]);
+    expect(h.pool.snapshot()).toMatchObject({ active: 1, waiting: 0 });
+
+    agent.runs[0]?.complete();
+    await collect(first.subscribe());
+    expect(h.pool.snapshot()).toMatchObject({ active: 0, waiting: 0 });
+  });
+
+  it('does not steer when the per-session model changed mid-run', async () => {
+    const agent = new SteerableAgent();
+    const h = await createHarness({ agent });
+    const first = await h.executor.submit({
+      scopeId: 'scope-1',
+      policy: policy(h.tmp.workspace),
+      model: 'gpt-6-astra',
+    });
+
+    await expect(h.executor.submit({
+      scopeId: 'scope-1',
+      policy: policy(h.tmp.workspace, { prompt: 'new model message' }),
+      model: 'gpt-5.6-sol',
+      allowSteer: true,
+    })).rejects.toMatchObject({ code: 'run-already-active' });
+    expect(agent.runs[0]?.steers).toEqual([]);
+
+    agent.runs[0]?.complete();
     await collect(first.subscribe());
   });
 
@@ -362,5 +421,56 @@ class DelayedPrepareAgent extends FakeAgentAdapter {
 
   releasePrepare(): void {
     this.resolvePrepare();
+  }
+}
+
+class SteerableAgent implements AgentAdapter {
+  readonly id = 'codex';
+  readonly displayName = 'Steerable Codex';
+  readonly runs: SteerableRun[] = [];
+
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+
+  run(opts: AgentRunOptions): AgentRun {
+    const run = new SteerableRun(opts.runId);
+    this.runs.push(run);
+    return run;
+  }
+}
+
+class SteerableRun implements AgentRun {
+  readonly steers: AgentSteerInput[] = [];
+  readonly events: AsyncIterable<AgentEvent>;
+  private finish!: () => void;
+
+  constructor(readonly runId: string) {
+    const completed = new Promise<void>((resolve) => {
+      this.finish = resolve;
+    });
+    this.events = {
+      async *[Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
+        await completed;
+        yield { type: 'done', terminationReason: 'normal' };
+      },
+    };
+  }
+
+  async steer(input: AgentSteerInput): Promise<{ accepted: boolean }> {
+    this.steers.push(input);
+    return { accepted: true };
+  }
+
+  complete(): void {
+    this.finish();
+  }
+
+  async stop(): Promise<void> {
+    this.finish();
+  }
+
+  async waitForExit(): Promise<boolean> {
+    return true;
   }
 }
